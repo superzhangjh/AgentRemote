@@ -1,0 +1,23 @@
+name: agent_remote
+description: "Android shell for the CloudCLI web interface."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.13.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  mobile_scanner: 6.0.2
+  qr_flutter: 4.1.0
+  url_launcher: ^6.3.2
+  webview_flutter: ^4.13.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
