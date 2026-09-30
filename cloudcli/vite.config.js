@@ -27,7 +27,10 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     define: {
-      __APP_VERSION__: JSON.stringify(pkg.version)
+      __APP_VERSION__: JSON.stringify(pkg.version),
+      // Stamped here, not read from the clock at runtime, so every client that
+      // loaded this bundle reports the same value.
+      __APP_BUILD_TIME__: JSON.stringify(new Date().toISOString())
     },
     resolve: {
       alias: {

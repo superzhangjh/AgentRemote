@@ -38,6 +38,15 @@ export const CLOUDCLI_WORDMARK_FONT_FAMILY =
  */
 export const APP_VERSION: string = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '';
 
+/**
+ * When this bundle was built, as an ISO string; empty outside a Vite build.
+ *
+ * Rendered in the sidebar footer. Its only job is to answer "which build is
+ * this client running" — the question that decides whether a missing fix is a
+ * bug or a stale WebView.
+ */
+export const APP_BUILD_TIME: string = typeof __APP_BUILD_TIME__ === 'string' ? __APP_BUILD_TIME__ : '';
+
 // ---------------------------
 
 //----------------- SETTINGS NAVIGATION ------------

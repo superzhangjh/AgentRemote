@@ -187,11 +187,12 @@ function SidebarProjectItem({
           // selection deliberately do not touch it.
           //
           // Tinted from `muted-foreground` rather than `muted`: in the light
-          // theme `muted` is 91% lightness against a 96% background, which is
-          // five points — technically a colour, visually nothing. This reads as
-          // the same light grey on the dark theme (15% against 8%).
+          // theme `muted` is 91% lightness against a 96% background — five
+          // points, technically a colour and visually nothing. This reads as a
+          // clear light grey on the light theme and the equivalent on the dark
+          // one (20% against 8%).
           isStarred
-            ? 'bg-muted-foreground/15 ring-1 ring-inset ring-border/60'
+            ? 'bg-muted-foreground/20 ring-1 ring-inset ring-border/50'
             : 'hover:bg-accent/40',
         )}
       >

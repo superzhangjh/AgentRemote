@@ -2,9 +2,21 @@ import { Settings, ArrowUpCircle, AlertTriangle } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { IS_PLATFORM } from '@/shared/utils';
+import { APP_BUILD_TIME } from '@/shared/constants';
 import type { ReleaseInfo } from '@/shared/types';
 
 const GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
+
+/** `2026-09-30T08:20:11.000Z` → `09-30 16:20` in the viewer's own time zone. */
+const formatBuildStamp = (isoTimestamp: string): string => {
+  const built = new Date(isoTimestamp);
+  if (Number.isNaN(built.getTime())) {
+    return '';
+  }
+
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(built.getMonth() + 1)}-${pad(built.getDate())} ${pad(built.getHours())}:${pad(built.getMinutes())}`;
+};
 
 type SidebarFooterProps = {
   updateAvailable: boolean;
@@ -28,6 +40,8 @@ export default function SidebarFooter({
   onShowSettings,
   t,
 }: SidebarFooterProps) {
+  const buildStamp = formatBuildStamp(APP_BUILD_TIME);
+
   return (
     <div className="flex-shrink-0" style={{ paddingBottom: 'min(env(safe-area-inset-bottom, 0px), 4px)' }}>
       {/* Restart-required banner: the running server version differs from the
@@ -119,6 +133,11 @@ export default function SidebarFooter({
           >
             CloudCLI v{currentVersion} – {t('branding.openSource')}
           </a>
+          {buildStamp && (
+            <p className="mt-0.5 text-[10px] text-muted-foreground/40" title={APP_BUILD_TIME}>
+              build {buildStamp}
+            </p>
+          )}
         </div>
       )}
 
@@ -133,6 +152,11 @@ export default function SidebarFooter({
           </div>
           <span className="text-sm font-normal text-foreground">{t('actions.settings')}</span>
         </button>
+        {buildStamp && (
+          <p className="pt-1 text-center text-[10px] text-muted-foreground/40" title={APP_BUILD_TIME}>
+            v{currentVersion} · build {buildStamp}
+          </p>
+        )}
       </div>
     </div>
   );
