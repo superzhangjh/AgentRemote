@@ -183,12 +183,12 @@ function SidebarProjectItem({
         title={isEditing ? undefined : rowTitle}
         className={cn(
           'mx-2 flex cursor-pointer select-none items-center gap-2 rounded-lg transition-colors',
-          isCompact ? 'px-2 py-2' : 'px-2 py-1.5',
+          isCompact ? 'px-1 py-2' : 'px-1 py-1.5',
           isStarred
             // Pinned keeps its tint in every state, including while selected.
             ? isSelected
-              ? 'bg-muted/60 ring-1 ring-inset ring-border'
-              : 'bg-muted/40 hover:bg-muted/60'
+              ? 'bg-muted/80 ring-1 ring-inset ring-border'
+              : 'bg-muted/70 hover:bg-muted'
             : isSelected
               ? 'bg-accent text-accent-foreground'
               : 'hover:bg-accent/40',

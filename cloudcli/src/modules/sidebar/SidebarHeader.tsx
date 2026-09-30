@@ -211,7 +211,7 @@ export default function SidebarHeader({
       )}
 
       {/* Solid, inset to the search field's edges */}
-      <div className="mx-3 mt-1.5 border-b border-border/60" />
+      <div className="mx-3 mb-2 mt-1.5 border-b border-border/60" />
     </div>
   );
 }
