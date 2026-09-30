@@ -376,7 +376,9 @@ export const api = {
       provider: string;
       projectPath: string;
       initialMessage?: unknown;
+      openCodeServerId?: string;
     }) => post('/api/providers/sessions', payload),
+    openCodeServers: () => get('/api/providers/opencode/servers'),
     sessionMessages: (
       sessionId: string,
       pagination: { limit?: number | null; offset?: number } = {},

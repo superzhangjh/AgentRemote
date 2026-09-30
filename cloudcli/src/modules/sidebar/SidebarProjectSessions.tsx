@@ -15,6 +15,7 @@ type SidebarProjectSessionsProps = {
   isLoadingMoreSessions: boolean;
   activeSessions: ReadonlySet<string>;
   attentionSessionIds: ReadonlySet<string>;
+  awaitingInputSessionIds: ReadonlySet<string>;
   currentTime: Date;
   /** The session being renamed, when it belongs to this project. */
   sessionRenameId: string | null;
@@ -70,6 +71,7 @@ export default function SidebarProjectSessions({
   isLoadingMoreSessions,
   activeSessions,
   attentionSessionIds,
+  awaitingInputSessionIds,
   currentTime,
   sessionRenameId,
   sessionRenameDraft,
@@ -126,6 +128,7 @@ export default function SidebarProjectSessions({
                     selectedSession={selectedSession}
                     isProcessing={activeSessions.has(session.id)}
                     needsAttention={attentionSessionIds.has(session.id)}
+                    isAwaitingInput={awaitingInputSessionIds.has(session.id)}
                     currentTime={currentTime}
                     onRenameDraftChange={onRenameDraftChange}
                     isEditing={session.id === sessionRenameId}

@@ -43,6 +43,7 @@ type SidebarProjectItemProps = {
   onLoadMoreSessions: (projectId: string) => void;
   activeSessions: ReadonlySet<string>;
   attentionSessionIds: ReadonlySet<string>;
+  awaitingInputSessionIds: ReadonlySet<string>;
   onNewSession: (project: Project) => void;
   onStartEditingSession: (projectId: string, sessionId: string, initialName: string) => void;
   onCancelEditingSession: () => void;
@@ -94,6 +95,7 @@ function SidebarProjectItem({
   onLoadMoreSessions,
   activeSessions,
   attentionSessionIds,
+  awaitingInputSessionIds,
   onNewSession,
   onStartEditingSession,
   onCancelEditingSession,
@@ -111,6 +113,10 @@ function SidebarProjectItem({
   // Aggregated so a collapsed project still shows that something is happening
   // inside it: a spinner while any of its sessions runs, an amber dot when one
   // finished unread (the same signal the session rows use).
+  // Aggregated for the collapsed row: blue when a child waits on the user,
+  // otherwise an amber spinner while a child works, otherwise a green dot for a
+  // child that finished unread.
+  const isAwaitingInput = sessions.some((session) => awaitingInputSessionIds.has(session.id));
   const isProcessing = sessions.some((session) => activeSessions.has(session.id));
   const hasUnread = sessions.some((session) => attentionSessionIds.has(session.id));
   const rowTitle = [
@@ -196,23 +202,30 @@ function SidebarProjectItem({
             : 'hover:bg-accent/40',
         )}
       >
-        {/* Running indicator while the project is collapsed; once expanded the
-            folder is enough, because each session shows its own state. */}
-        {isProcessing && !isExpanded ? (
+        {/* Leading edge, and the colours carry the meaning: blue = a child is
+            waiting on you, amber (collapsed only) = a child is working, green =
+            a child finished unread. When expanded the folder is enough, because
+            the sessions show their own dots. */}
+        {isAwaitingInput ? (
+          <span
+            className="absolute -left-1.5 top-1/2 h-2 w-2 -translate-y-1/2 animate-pulse rounded-full bg-blue-500"
+            title={t('tooltips.awaitingInputIndicator', { defaultValue: 'Waiting for your answer' })}
+          />
+        ) : isProcessing && !isExpanded ? (
           <span
             className="flex h-4 w-4 shrink-0 items-center justify-center"
             title={t('tooltips.processingSessionIndicator', { defaultValue: 'Processing session' })}
           >
-            <Loader2 className="h-4 w-4 animate-spin text-emerald-500" />
+            <Loader2 className="h-4 w-4 animate-spin text-amber-500" />
           </span>
         ) : (
           <Folder className="h-4 w-4 shrink-0 text-muted-foreground/80" />
         )}
 
-        {hasUnread && !isProcessing && (
+        {hasUnread && !isProcessing && !isAwaitingInput && (
           <span
-            className="absolute -left-1.5 top-1/2 h-2 w-2 -translate-y-1/2 animate-pulse rounded-full bg-amber-500"
-            title={t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })}
+            className="absolute -left-1.5 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-emerald-500"
+            title={t('tooltips.completedUnreadIndicator', { defaultValue: 'Finished since you last looked' })}
           />
         )}
 
@@ -315,6 +328,7 @@ function SidebarProjectItem({
         isLoadingMoreSessions={isLoadingMoreSessions}
         activeSessions={activeSessions}
         attentionSessionIds={attentionSessionIds}
+        awaitingInputSessionIds={awaitingInputSessionIds}
         currentTime={currentTime}
         sessionRenameId={sessionRenameId}
         sessionRenameDraft={sessionRenameDraft}

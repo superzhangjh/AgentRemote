@@ -54,6 +54,10 @@ type ChatComposerProps = {
   availablePermissionModes: PermissionMode[];
   onSelectPermissionMode: (mode: PermissionMode) => void;
   providerLabel: string;
+  openCodeServers?: Array<{ id: string; label: string; url: string }>;
+  selectedOpenCodeServerId?: string;
+  onSelectOpenCodeServer?: (id: string) => void;
+  openCodeServersError?: string | null;
   effort: string;
   availableEffortOptions: NonNullable<ProviderModelOption['effort']>['values'];
   onSelectEffort: (effort: string) => void;
@@ -125,6 +129,10 @@ export default function ChatComposer({
   availablePermissionModes,
   onSelectPermissionMode,
   providerLabel,
+  openCodeServers,
+  selectedOpenCodeServerId,
+  onSelectOpenCodeServer,
+  openCodeServersError,
   effort,
   availableEffortOptions,
   onSelectEffort,
@@ -458,6 +466,24 @@ export default function ChatComposer({
           </PromptInputTools>
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
+            {openCodeServers && (
+              <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="sr-only">OpenCode 实例</span>
+                <select
+                  aria-label="OpenCode 实例"
+                  value={selectedOpenCodeServerId ?? ''}
+                  onChange={(event) => onSelectOpenCodeServer?.(event.target.value)}
+                  disabled={isLoading || openCodeServers.length === 0}
+                  className="max-w-36 rounded border border-input bg-background px-1 py-1 text-foreground sm:max-w-52"
+                  title={openCodeServersError ?? '选择新会话使用的 OpenCode 客户端'}
+                >
+                  {openCodeServers.length === 0 && <option value="">{openCodeServersError ?? '未找到 OpenCode 服务'}</option>}
+                  {openCodeServers.map((server) => (
+                    <option key={server.id} value={server.id}>{server.label} ({new URL(server.url).port})</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <ComposerModelMenu
               effort={effort}
               effortOptions={availableEffortOptions}

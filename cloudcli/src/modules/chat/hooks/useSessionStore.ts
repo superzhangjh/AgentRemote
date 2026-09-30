@@ -108,33 +108,69 @@ function enqueueHistoryMutation<T>(
   return result;
 }
 
+/** How many times a transient history read is retried before surfacing an error. */
+const SESSION_HISTORY_REQUEST_ATTEMPTS = 3;
+/** Backoff between history retries; short enough that the loading state stays live. */
+const SESSION_HISTORY_RETRY_DELAY_MS = 400;
+
+/** 5xx, timeouts and rate limits are worth retrying; other 4xx are definitive. */
+function isRetryableHistoryStatus(status: number): boolean {
+  return status >= 500 || status === 408 || status === 429;
+}
+
 async function requestSessionHistoryPage(
   sessionId: string,
   options: SessionMessagesRequestOptions,
   provider: LLMProvider,
 ): Promise<SessionHistoryPage> {
-  const response = await api.providers.sessionMessages(sessionId, options, {
-    signal: AbortSignal.timeout(SESSION_HISTORY_REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  let lastError: unknown = null;
 
-  const body = await response.json();
-  const data = body?.data ?? body;
-  const messages: NormalizedMessage[] = Array.isArray(data.messages) ? data.messages : [];
-  if (messages.some((message) => !message || message.sessionId !== sessionId || message.provider !== provider)) {
-    throw new Error('Session history identity mismatch');
+  // A provider server can be briefly busy finishing a turn, which used to
+  // surface as an empty transcript. Retry transient failures while the caller
+  // keeps showing "loading session messages" instead of an empty state.
+  for (let attempt = 0; attempt < SESSION_HISTORY_REQUEST_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, SESSION_HISTORY_RETRY_DELAY_MS * attempt));
+    }
+
+    let response: Response;
+    try {
+      response = await api.providers.sessionMessages(sessionId, options, {
+        signal: AbortSignal.timeout(SESSION_HISTORY_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      // Network failures and timeouts are transient.
+      lastError = error;
+      continue;
+    }
+
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      if (!isRetryableHistoryStatus(response.status)) throw error;
+      lastError = error;
+      continue;
+    }
+
+    const body = await response.json();
+    const data = body?.data ?? body;
+    const messages: NormalizedMessage[] = Array.isArray(data.messages) ? data.messages : [];
+    if (messages.some((message) => !message || message.sessionId !== sessionId || message.provider !== provider)) {
+      throw new Error('Session history identity mismatch');
+    }
+
+    return {
+      messages,
+      total: typeof data.total === 'number' ? data.total : messages.length,
+      hasMore: Boolean(data.hasMore),
+      ...(
+        data && typeof data === 'object' && 'tokenUsage' in data
+          ? { tokenUsage: data.tokenUsage }
+          : {}
+      ),
+    };
   }
 
-  return {
-    messages,
-    total: typeof data.total === 'number' ? data.total : messages.length,
-    hasMore: Boolean(data.hasMore),
-    ...(
-      data && typeof data === 'object' && 'tokenUsage' in data
-        ? { tokenUsage: data.tokenUsage }
-        : {}
-    ),
-  };
+  throw lastError instanceof Error ? lastError : new Error('Session history request failed');
 }
 
 /**

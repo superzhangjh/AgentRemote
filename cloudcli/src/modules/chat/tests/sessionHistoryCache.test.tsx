@@ -133,6 +133,31 @@ describe('persisted session store', () => {
     expect(writeHistory).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalled();
   });
+
+  it('retries a transient history failure instead of showing an empty transcript', async () => {
+    sessionMessages
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) })
+      .mockResolvedValueOnce(response([row(0), row(1)]));
+
+    const view = renderHook(() => useSessionStore('account-a'));
+    await act(async () => { await view.result.current.fetchFromServer('session-a', { limit: null }); });
+
+    expect(sessionMessages).toHaveBeenCalledTimes(2);
+    expect(view.result.current.getMessages('session-a')).toEqual([row(0), row(1)]);
+    expect(view.result.current.getSessionSlot('session-a')?.status).toBe('idle');
+  }, 10_000);
+
+  it('does not retry a definitive 4xx history failure', async () => {
+    sessionMessages.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const view = renderHook(() => useSessionStore('account-a'));
+    await act(async () => { await view.result.current.fetchFromServer('session-a', { limit: null }); });
+
+    expect(sessionMessages).toHaveBeenCalledTimes(1);
+    expect(view.result.current.getSessionSlot('session-a')?.status).toBe('error');
+    expect(error).toHaveBeenCalled();
+  });
 });
 
 const project = { projectId: 'project-a', path: '/repo', fullPath: '/repo', displayName: 'Repo', isStarred: false } as Project;

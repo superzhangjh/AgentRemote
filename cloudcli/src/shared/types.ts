@@ -1266,10 +1266,12 @@ export type MobileTerminalSelectionManager = {
 export type SessionRowActions = {
   /** The rename currently open anywhere in the sidebar, or null. */
   activeRename: ActiveSidebarRename | null;
-  /** Sessions with a run in flight: they show a spinner and hide destructive actions. */
+  /** Sessions with a run in flight: they show the amber dot and hide destructive actions. */
   activeSessions: ReadonlySet<string>;
-  /** Sessions waiting on the user, which show the amber dot. */
+  /** Sessions that finished with unread output, which show the green dot. */
   attentionSessionIds: ReadonlySet<string>;
+  /** Sessions blocked on a tool approval or a question, which show the blue dot. */
+  awaitingInputSessionIds: ReadonlySet<string>;
   onRenameDraftChange: (draft: string) => void;
   onStartEditingSession: (projectId: string, sessionId: string, initialName: string) => void;
   onCancelEditingSession: () => void;

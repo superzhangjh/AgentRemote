@@ -46,6 +46,7 @@ const makeActions = (overrides: Partial<SessionRowActions> = {}): SessionRowActi
   activeRename: null,
   activeSessions: new Set<string>(),
   attentionSessionIds: new Set<string>(),
+  awaitingInputSessionIds: new Set<string>(),
   onRenameDraftChange: noop,
   onStartEditingSession: noop,
   onCancelEditingSession: noop,
@@ -131,14 +132,24 @@ test('a running session is marked processing and shows a spinner instead of its 
   assert.equal(container.querySelectorAll('time').length, 1);
 });
 
-test('a session needing attention gets the amber dot', () => {
+test('a session waiting on the user gets the blue dot', () => {
+  const { container } = renderList(
+    [conversation('s1'), conversation('s2')],
+    makeActions({ awaitingInputSessionIds: new Set(['s2']) }),
+  );
+
+  const dots = container.querySelectorAll('[role="status"].bg-blue-500');
+  assert.equal(dots.length, 1);
+  const rows = container.querySelectorAll('[data-testid="recent-conversation-row"]');
+  assert.equal(rows.length, 2);
+});
+
+test('a session that finished unread gets the green dot', () => {
   const { container } = renderList(
     [conversation('s1'), conversation('s2')],
     makeActions({ attentionSessionIds: new Set(['s2']) }),
   );
 
-  const dots = container.querySelectorAll('[role="status"].bg-amber-500');
+  const dots = container.querySelectorAll('[role="status"].bg-emerald-500');
   assert.equal(dots.length, 1);
-  const rows = container.querySelectorAll('[data-testid="recent-conversation-row"]');
-  assert.equal(rows.length, 2);
 });

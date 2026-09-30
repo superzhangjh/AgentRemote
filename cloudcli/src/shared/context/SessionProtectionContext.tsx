@@ -36,6 +36,7 @@ type SessionProtectionActions = {
 const SessionProtectionStateContext = createContext<SessionActivityMap | null>(null);
 const SessionProtectionActionsContext = createContext<SessionProtectionActions | null>(null);
 const BusySessionIdsContext = createContext<ReadonlySet<string> | null>(null);
+const AwaitingInputSessionIdsContext = createContext<ReadonlySet<string> | null>(null);
 
 /**
  * The set of session ids currently producing a response, with a stable identity
@@ -51,6 +52,36 @@ function useBusySessionIds(processingSessions: SessionActivityMap): ReadonlySet<
   // identity stable across the `statusText` rewrites without reading a ref
   // during render. Session ids never contain a NUL, so it is a safe separator.
   const membershipKey = [...processingSessions.keys()].sort().join('\u0000');
+
+  return useMemo(
+    () => new Set(membershipKey ? membershipKey.split('\u0000') : []),
+    [membershipKey],
+  );
+}
+
+/**
+ * The phase labels a run reports while it is blocked on the user.
+ *
+ * These are the exact strings the chat gateway and the OpenCode bridge put in
+ * `statusText`; the sidebar needs them to colour "等待审批/等待回答" differently
+ * from a run that is simply working. Kept next to the set below so the two
+ * places that must agree are in one file.
+ */
+const AWAITING_INPUT_STATUS_TEXTS = ['等待审批', '等待回答'];
+
+export const isAwaitingInputStatusText = (statusText: string | null | undefined): boolean =>
+  typeof statusText === 'string' && AWAITING_INPUT_STATUS_TEXTS.includes(statusText);
+
+/**
+ * Sessions whose run is waiting on the user (a tool approval or a question),
+ * with the same stable identity guarantee as `useBusySessionIds`.
+ */
+function useAwaitingInputSessionIds(processingSessions: SessionActivityMap): ReadonlySet<string> {
+  const membershipKey = [...processingSessions.entries()]
+    .filter(([, activity]) => isAwaitingInputStatusText(activity.statusText))
+    .map(([sessionId]) => sessionId)
+    .sort()
+    .join('\u0000');
 
   return useMemo(
     () => new Set(membershipKey ? membershipKey.split('\u0000') : []),
@@ -163,13 +194,16 @@ export function SessionProtectionProvider({
   );
 
   const busySessionIds = useBusySessionIds(processingSessions);
+  const awaitingInputSessionIds = useAwaitingInputSessionIds(processingSessions);
 
   return (
     <SessionProtectionActionsContext.Provider value={actions}>
       <BusySessionIdsContext.Provider value={busySessionIds}>
-        <SessionProtectionStateContext.Provider value={processingSessions}>
-          {children}
-        </SessionProtectionStateContext.Provider>
+        <AwaitingInputSessionIdsContext.Provider value={awaitingInputSessionIds}>
+          <SessionProtectionStateContext.Provider value={processingSessions}>
+            {children}
+          </SessionProtectionStateContext.Provider>
+        </AwaitingInputSessionIdsContext.Provider>
       </BusySessionIdsContext.Provider>
     </SessionProtectionActionsContext.Provider>
   );
@@ -187,8 +221,19 @@ export function useBusySessionIdSet(): ReadonlySet<string> {
   return busySessionIds;
 }
 
-export function useProcessingSessions(): SessionActivityMap {
-  const processingSessions = useContext(SessionProtectionStateContext);
+/**
+ * Sessions waiting on the user right now (tool approval or a question), for the
+ * sidebar's blue state.
+ */
+export function useAwaitingInputSessionIdSet(): ReadonlySet<string> {
+  const awaitingInputSessionIds = useContext(AwaitingInputSessionIdsContext);
+  if (!awaitingInputSessionIds) {
+    throw new Error('useAwaitingInputSessionIdSet must be used within SessionProtectionProvider');
+  }
+  return awaitingInputSessionIds;
+}
+
+export function useProcessingSessions(): SessionActivityMap {  const processingSessions = useContext(SessionProtectionStateContext);
   if (!processingSessions) {
     throw new Error('useProcessingSessions must be used within SessionProtectionProvider');
   }

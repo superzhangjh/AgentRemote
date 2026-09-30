@@ -7,7 +7,7 @@ import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPrefere
 import { useSidebarController } from '@/modules/sidebar/hooks/useSidebarController';
 import { useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import { usePaletteOps } from '@/modules/command-palette';
-import { useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
+import { useAwaitingInputSessionIdSet, useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
 import { readSelectedProvider, writeSelectedProvider } from '@/shared/selectedProvider';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSession, SidebarProjectListProps } from '@/shared/types';
@@ -79,6 +79,7 @@ function Sidebar({
   // Only membership is rendered here, so subscribing to the full activity map
   // would re-render the whole tree on every provider status frame.
   const activeSessions = useBusySessionIdSet();
+  const awaitingInputSessionIds = useAwaitingInputSessionIdSet();
   const [selectedProvider, setSelectedProvider] = useState(readSelectedProvider);
 
   useEffect(() => subscribeToUserPreferences(() => {
@@ -216,6 +217,7 @@ function Sidebar({
     loadingMoreProjects,
     activeSessions,
     attentionSessionIds,
+    awaitingInputSessionIds,
     forceExpanded: searchMode === 'running' || Boolean(searchFilter.trim()),
     isProjectStarred,
     onRenameDraftChange: updateRenameDraft,

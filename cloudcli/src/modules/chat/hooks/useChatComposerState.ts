@@ -35,6 +35,7 @@ type UseChatComposerStateArgs = {
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
   provider: LLMProvider;
+  openCodeServerId?: string;
   permissionMode: PermissionMode | string;
   cyclePermissionMode: () => void;
   resolvePermissionModeForProvider: (provider: LLMProvider, requestedMode: PermissionMode | string) => PermissionMode;
@@ -159,6 +160,7 @@ export function useChatComposerState({
   selectedSession,
   currentSessionId,
   provider,
+  openCodeServerId,
   permissionMode,
   cyclePermissionMode,
   resolvePermissionModeForProvider,
@@ -776,6 +778,7 @@ export function useChatComposerState({
             provider,
             projectPath: resolvedProjectPath,
             initialMessage: messageContent,
+            ...(provider === 'opencode' && openCodeServerId ? { openCodeServerId } : {}),
           });
           if (!response.ok) {
             throw new Error(`Failed to create session (${response.status})`);
@@ -891,6 +894,7 @@ export function useChatComposerState({
       onSessionProcessing,
       onSessionEstablished,
       provider,
+      openCodeServerId,
       recordSentMessage,
       resetCommandMenuState,
       scrollToBottom,

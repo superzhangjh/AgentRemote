@@ -110,6 +110,7 @@ export default function SidebarRecentConversations({
           const isSelected = String(selectedSession?.id ?? '') === conversation.sessionId;
           const age = formatCompactAge(conversation.lastActivity, currentTime);
           const isProcessing = sessionActions.activeSessions.has(conversation.sessionId);
+          const isAwaitingInput = sessionActions.awaitingInputSessionIds.has(conversation.sessionId);
           const showAttentionIndicator =
             sessionActions.attentionSessionIds.has(conversation.sessionId) && !isSelected;
           // Resolved per row so a keystroke in one rename does not redraw the rest.
@@ -132,20 +133,27 @@ export default function SidebarRecentConversations({
           return (
             <div key={conversation.sessionId} className="group relative">
               {/*
-                * Only the amber "needs attention" dot, and the spinner below. The
-                * Projects row also has a green dot for a session touched recently,
-                * which carries no information in a list ordered by recency.
+                * Blue when the run waits on the user, green when it finished
+                * with something unread — the same two meanings the project list
+                * uses, so one glance reads the same in either list.
                 */}
-              {showAttentionIndicator && (
+              {(isAwaitingInput || showAttentionIndicator) && (
                 <div className="absolute left-0 top-1/2 -translate-x-1 -translate-y-1/2 transform">
                   <Tooltip
-                    content={t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })}
+                    content={isAwaitingInput
+                      ? t('tooltips.awaitingInputIndicator', { defaultValue: 'Waiting for your answer' })
+                      : t('tooltips.completedUnreadIndicator', { defaultValue: 'Finished since you last looked' })}
                     position="right"
                   >
                     <div
                       role="status"
-                      aria-label={t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })}
-                      className="h-2 w-2 animate-pulse rounded-full bg-amber-500"
+                      aria-label={isAwaitingInput
+                        ? t('tooltips.awaitingInputIndicator', { defaultValue: 'Waiting for your answer' })
+                        : t('tooltips.completedUnreadIndicator', { defaultValue: 'Finished since you last looked' })}
+                      className={cn(
+                        'h-2 w-2 rounded-full',
+                        isAwaitingInput ? 'animate-pulse bg-blue-500' : 'bg-emerald-500',
+                      )}
                     />
                   </Tooltip>
                 </div>
@@ -182,7 +190,7 @@ export default function SidebarRecentConversations({
                       <>
                         <span className="flex-shrink-0 text-muted-foreground/40">·</span>
                         <Tooltip content={t('tooltips.processingSessionIndicator', 'Processing session')} position="top">
-                          <Loader2 className="h-3 w-3 flex-shrink-0 animate-spin" />
+                          <Loader2 className="h-3 w-3 flex-shrink-0 animate-spin text-amber-500" />
                         </Tooltip>
                       </>
                     ) : age && (

@@ -16,6 +16,8 @@ type SidebarSessionItemProps = {
   selectedSession: ProjectSession | null;
   isProcessing: boolean;
   needsAttention: boolean;
+  /** Blocked on a tool approval or a question: the blue state. */
+  isAwaitingInput: boolean;
   currentTime: Date;
   /** Resolved for this row, so a keystroke elsewhere does not invalidate it. */
   isEditing: boolean;
@@ -48,6 +50,7 @@ function SidebarSessionItem({
   selectedSession,
   isProcessing,
   needsAttention,
+  isAwaitingInput,
   currentTime,
   isEditing,
   renameDraft,
@@ -114,14 +117,16 @@ function SidebarSessionItem({
     compactSessionAge ? t('projects.lastActiveLabel', { age: compactSessionAge, defaultValue: '{{age}} ago' }) : '',
   ].filter(Boolean).join(' · ');
 
-  // Session status lives in the row's leading column, as a dot: green while the
-  // session runs, amber when it finished unread. The spinner it used to show sat
-  // with the row actions, where it competed with the buttons.
-  const statusDot = isProcessing
-    ? { className: 'bg-emerald-500', title: t('tooltips.processingSessionIndicator', 'Processing session') }
-    : showAttentionIndicator
-      ? { className: 'bg-amber-500 animate-pulse', title: t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' }) }
-      : null;
+  // Session status lives in the row's leading column, as a dot, one colour per
+  // meaning: blue while the run waits on the user, amber while it works, green
+  // once it has finished with something unread.
+  const statusDot = isAwaitingInput
+    ? { className: 'bg-blue-500 animate-pulse', title: t('tooltips.awaitingInputIndicator', { defaultValue: 'Waiting for your answer' }) }
+    : isProcessing
+      ? { className: 'bg-amber-500', title: t('tooltips.processingSessionIndicator', 'Processing session') }
+      : showAttentionIndicator
+        ? { className: 'bg-emerald-500', title: t('tooltips.completedUnreadIndicator', { defaultValue: 'Finished since you last looked' }) }
+        : null;
 
   return (
     <div className="group relative">

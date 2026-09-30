@@ -58,13 +58,13 @@ export default function SidebarSearchModeTabs({
           onClick={() => onSearchModeChange('running')}
           className={cn(
             segmentClass(searchMode === 'running'),
-            searchMode === 'running' && 'ring-1 ring-emerald-500/15',
+            searchMode === 'running' && 'ring-1 ring-amber-500/15',
           )}
         >
           <span className="relative flex h-3.5 w-3.5 items-center justify-center">
-            <Activity className={cn('h-3.5 w-3.5', runningSessionsCount > 0 && 'text-emerald-500')} />
+            <Activity className={cn('h-3.5 w-3.5', runningSessionsCount > 0 && 'text-amber-500')} />
             {runningSessionsCount > 0 && (
-              <span className="absolute -right-2 -top-1.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-emerald-500 px-0.5 text-[8px] font-semibold leading-none text-white shadow-sm ring-1 ring-background">
+              <span className="absolute -right-2 -top-1.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[8px] font-semibold leading-none text-white shadow-sm ring-1 ring-background">
                 {runningBadgeText}
               </span>
             )}
