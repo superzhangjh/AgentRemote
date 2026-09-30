@@ -19,7 +19,8 @@
     "tryDifferentSearch": "尝试调整您的搜索词",
     "runClaudeCli": "在项目目录中运行 Claude CLI 以开始使用",
     "sessionCount": "{{count}} 个会话",
-    "projectOptions": "项目操作"
+    "projectOptions": "项目操作",
+    "lastActiveLabel": "{{age}}前"
   },
   "app": {
     "title": "Agent 遥控台",
@@ -34,7 +35,10 @@
     "loadingSessions": "加载会话中...",
     "unnamed": "未命名",
     "loading": "加载中...",
-    "showMore": "显示更多会话"
+    "showMore": "显示更多会话",
+    "messageCount": "{{count}} 条消息",
+    "sessionOptions": "会话操作",
+    "forkSession": "派生会话"
   },
   "tooltips": {
     "viewEnvironments": "查看环境",

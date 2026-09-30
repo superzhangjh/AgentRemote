@@ -1,10 +1,7 @@
-import { Plus } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
-import { Button } from '@/shared/ui';
 import type { LLMProvider, Project, ProjectSession, SessionWithProvider } from '@/shared/types';
 import SidebarSessionItem from '@/modules/sidebar/SidebarSessionItem';
-import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
 
 type SidebarProjectSessionsProps = {
   project: Project;
@@ -37,21 +34,22 @@ function SessionListSkeleton() {
   return (
     <>
       {Array.from({ length: 3 }).map((_, index) => (
-        <div key={index} className="rounded-md p-2">
-          <div className="flex items-start gap-2">
-            <div className="mt-0.5 h-3 w-3 animate-pulse rounded-full bg-muted" />
-            <div className="flex-1 space-y-1">
-              <div className="h-3 animate-pulse rounded bg-muted" style={{ width: `${60 + index * 15}%` }} />
-              <div className="h-2 w-1/2 animate-pulse rounded bg-muted" />
-            </div>
-          </div>
+        <div key={index} className="px-2 py-1.5">
+          <div className="h-3 animate-pulse rounded bg-muted" style={{ width: `${60 + index * 15}%` }} />
         </div>
       ))}
     </>
   );
 }
 
-/** Rendered by SidebarProjectItem to show an expanded project's sessions, delegating each row to SidebarSessionItem. */
+/**
+ * Rendered by SidebarProjectItem to show an expanded project's sessions,
+ * delegating each row to SidebarSessionItem.
+ *
+ * No "new session" button here: starting one is the project row's trailing
+ * control now (it is what the expanded row shows in place of the chevron), so
+ * the list is only the list.
+ */
 export default function SidebarProjectSessions({
   project,
   isExpanded,
@@ -74,11 +72,8 @@ export default function SidebarProjectSessions({
   onDeleteSession,
   onForkSession,
   onLoadMoreSessions,
-  onNewSession,
   t,
 }: SidebarProjectSessionsProps) {
-  const isCompact = useCompactSidebar();
-
   if (!isExpanded) {
     return null;
   }
@@ -86,38 +81,11 @@ export default function SidebarProjectSessions({
   const hasSessions = sessions.length > 0;
 
   return (
-    <div className="ml-3 space-y-1 border-l border-border pl-3">
-      {isCompact ? (
-        <div className="px-3 pb-1 pt-1">
-          <button
-            className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-primary text-xs font-medium text-primary-foreground transition-all duration-150 hover:bg-primary/90 active:scale-[0.98]"
-            onClick={() => {
-              onProjectSelect(project);
-              onNewSession(project);
-            }}
-          >
-            <Plus className="h-3 w-3" />
-            {t('sessions.newSession')}
-          </button>
-        </div>
-      ) : (
-        <Button
-          variant="default"
-          size="sm"
-          className="flex h-8 w-full justify-start gap-2 bg-primary text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-          onClick={() => onNewSession(project)}
-        >
-          <Plus className="h-3 w-3" />
-          {t('sessions.newSession')}
-        </Button>
-      )}
-
+    <div className="pb-1 pl-7 pr-2">
       {!initialSessionsLoaded ? (
         <SessionListSkeleton />
       ) : !hasSessions ? (
-        <div className="px-3 py-2 text-left">
-          <p className="text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
-        </div>
+        <p className="px-2 py-1.5 text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
       ) : (
         <>
           {sessions.map((session) => (
@@ -144,15 +112,14 @@ export default function SidebarProjectSessions({
           ))}
 
           {hasMoreSessions && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 w-full justify-center text-xs text-muted-foreground hover:text-foreground"
+            <button
+              type="button"
+              className="w-full rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground disabled:opacity-60"
               onClick={() => onLoadMoreSessions(project.projectId)}
               disabled={isLoadingMoreSessions}
             >
-              {isLoadingMoreSessions ? t('sessions.loadingSessions') : 'Load more sessions'}
-            </Button>
+              {isLoadingMoreSessions ? t('sessions.loadingSessions') : t('sessions.showMore')}
+            </button>
           )}
         </>
       )}

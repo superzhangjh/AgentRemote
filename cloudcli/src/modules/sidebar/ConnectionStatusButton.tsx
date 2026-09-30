@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { Loader2, Wifi, WifiOff } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 
 import { cn } from '@/shared/utils';
 import { useConnectionStatus } from '@/shared/hooks/useConnectionStatus';
@@ -60,33 +60,24 @@ export default function ConnectionStatusButton({ size = 'md', className }: Conne
         aria-label={label}
         title={label}
         className={cn(
-          'relative flex shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors',
-          size === 'sm' ? 'h-7 w-7' : 'h-8 w-8 bg-muted/50',
+          'flex shrink-0 items-center gap-1.5 rounded-full border px-2 text-xs font-medium transition-colors',
+          size === 'sm' ? 'h-7' : 'h-8 px-2.5',
           state === 'connected'
-            ? 'hover:bg-accent/80 hover:text-foreground'
-            : 'cursor-pointer bg-amber-500/10 hover:bg-amber-500/20',
-          state === 'offline' && 'bg-red-500/10 hover:bg-red-500/20',
+            ? 'border-border/60 bg-muted/40 text-muted-foreground hover:bg-accent/60 hover:text-foreground'
+            : 'cursor-pointer',
+          state === 'connecting' && 'border-amber-500/30 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 dark:text-amber-400',
+          state === 'offline' && 'border-red-500/30 bg-red-500/10 text-red-600 hover:bg-red-500/20 dark:text-red-400',
           className,
         )}
       >
-        {isChecking && state !== 'connected' ? (
-          <Loader2 className={cn(size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4', 'animate-spin')} />
-        ) : state === 'connected' ? (
-          <Wifi className={size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
-        ) : (
-          <WifiOff className={size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
-        )}
-
-        <span
-          className={cn(
-            'absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full ring-2 ring-background',
-            STATE_DOT[state],
+        <span className="relative flex h-2 w-2 shrink-0 items-center justify-center">
+          <span className={cn('h-2 w-2 rounded-full', STATE_DOT[state])} />
+          {state === 'connecting' && (
+            <span className="absolute inset-0 animate-ping rounded-full bg-amber-500/60" aria-hidden="true" />
           )}
-          aria-hidden="true"
-        />
-        {state === 'connecting' && (
-          <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-ping rounded-full bg-amber-500/70" aria-hidden="true" />
-        )}
+        </span>
+        <span className="whitespace-nowrap">{label}</span>
+        {isChecking && state !== 'connected' && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
       </button>
       </Tooltip>
     </div>

@@ -99,7 +99,7 @@ export default function SidebarHeader({
             <LogoBlock t={t} />
           )}
 
-          <div className="flex flex-shrink-0 items-center gap-0.5">
+          <div className="flex flex-shrink-0 items-center gap-1">
             <ConnectionStatusButton size="sm" />
             <Button
               variant="ghost"

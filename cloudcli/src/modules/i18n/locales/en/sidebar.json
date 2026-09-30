@@ -19,7 +19,8 @@
     "tryDifferentSearch": "Try adjusting your search term",
     "runClaudeCli": "Run Claude CLI in a project directory to get started",
     "sessionCount": "{{count}} sessions",
-    "projectOptions": "Project options"
+    "projectOptions": "Project options",
+    "lastActiveLabel": "{{age}} ago"
   },
   "app": {
     "title": "Agent 遥控台",
@@ -34,7 +35,10 @@
     "loadingSessions": "Loading sessions...",
     "unnamed": "Unnamed",
     "loading": "Loading...",
-    "showMore": "Show more sessions"
+    "showMore": "Show more sessions",
+    "messageCount": "{{count}} messages",
+    "sessionOptions": "Session options",
+    "forkSession": "Fork session"
   },
   "tooltips": {
     "viewEnvironments": "View Environments",
