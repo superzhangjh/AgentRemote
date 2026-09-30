@@ -196,10 +196,9 @@ function SidebarProjectItem({
             : 'hover:bg-accent/40',
         )}
       >
-        {/* Running swaps the folder glyph itself, so the indicator costs no
-            extra room; unread stays a dot in the sidebar gutter, left of
-            everything and outside the padding box. */}
-        {isProcessing ? (
+        {/* Running indicator while the project is collapsed; once expanded the
+            folder is enough, because each session shows its own state. */}
+        {isProcessing && !isExpanded ? (
           <span
             className="flex h-4 w-4 shrink-0 items-center justify-center"
             title={t('tooltips.processingSessionIndicator', { defaultValue: 'Processing session' })}

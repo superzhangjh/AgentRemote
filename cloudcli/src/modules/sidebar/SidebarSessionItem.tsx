@@ -2,7 +2,7 @@ import { memo, useState } from 'react';
 import { Check, Edit2, GitBranch, Loader2, MoreHorizontal, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
-import { Dialog, DialogContent, DialogTitle, Tooltip } from '@/shared/ui';
+import { Dialog, DialogContent, DialogTitle } from '@/shared/ui';
 import { cn } from '@/shared/utils';
 import type { LLMProvider, Project, ProjectSession, SessionWithProvider } from '@/shared/types';
 import { PROVIDER_LABELS, createSessionViewModel, formatCompactAge } from '@/modules/sidebar/utils/sidebarProjectFormatting';
@@ -67,7 +67,6 @@ function SidebarSessionItem({
   const compactSessionAge = formatCompactAge(sessionView.sessionTime, currentTime);
   const [isMobileOptionsOpen, setIsMobileOptionsOpen] = useState(false);
   const showAttentionIndicator = needsAttention && !isSelected;
-  const showRecentIndicator = !showAttentionIndicator && !isProcessing && sessionView.isActive;
   const providerLabel = PROVIDER_LABELS[session.__provider];
 
   // The desktop controls live in SessionOptions, which owns the rename panel and
@@ -115,24 +114,14 @@ function SidebarSessionItem({
     compactSessionAge ? t('projects.lastActiveLabel', { age: compactSessionAge, defaultValue: '{{age}} ago' }) : '',
   ].filter(Boolean).join(' · ');
 
-  const statusIndicator = isProcessing ? (
-    <Tooltip content={t('tooltips.processingSessionIndicator', 'Processing session')} position="top">
-      <span className="flex shrink-0 items-center justify-center">
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-500" />
-      </span>
-    </Tooltip>
-  ) : showAttentionIndicator ? (
-    <Tooltip
-      content={t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })}
-      position="top"
-    >
-      <span role="status" className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-500" />
-    </Tooltip>
-  ) : showRecentIndicator ? (
-    <Tooltip content={t('tooltips.activeSessionIndicator')} position="top">
-      <span role="status" className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-    </Tooltip>
-  ) : null;
+  // Session status lives in the row's leading column, as a dot: green while the
+  // session runs, amber when it finished unread. The spinner it used to show sat
+  // with the row actions, where it competed with the buttons.
+  const statusDot = isProcessing
+    ? { className: 'bg-emerald-500', title: t('tooltips.processingSessionIndicator', 'Processing session') }
+    : showAttentionIndicator
+      ? { className: 'bg-amber-500 animate-pulse', title: t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' }) }
+      : null;
 
   return (
     <div className="group relative">
@@ -152,13 +141,20 @@ function SidebarSessionItem({
           selectSession();
         }}
       >
-        {/* The open session's only marker: a short orange bar at its far left.
-            The tinted background it used to get competed with the pin, and the
-            full-height bar read as a divider between rows. */}
+        {/* Leading column: the open session's bar, then its status dot, aligned
+            under the owning project's folder icon. */}
         {isSelected && (
           <span
             aria-hidden="true"
             className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-orange-500"
+          />
+        )}
+        {statusDot && (
+          <span
+            role="status"
+            aria-label={statusDot.title}
+            title={statusDot.title}
+            className={cn('absolute left-4 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full', statusDot.className)}
           />
         )}
 
@@ -166,7 +162,6 @@ function SidebarSessionItem({
 
         {isCompact ? (
           <>
-            {statusIndicator}
             <button
               type="button"
               aria-label={t('sessions.sessionOptions', { defaultValue: 'Session options' })}
@@ -182,19 +177,15 @@ function SidebarSessionItem({
               <MoreHorizontal className="h-4 w-4" />
             </button>
           </>
-        ) : (
-          <span className={cn('flex shrink-0 items-center', !isEditing && 'group-hover:opacity-0')}>
-            {statusIndicator}
-          </span>
-        )}
+        ) : null}
       </a>
 
       {!isCompact && (
         <SessionOptions
           className={cn(
             'absolute right-0 top-1/2 -translate-y-1/2 transform transition-all duration-200',
-            // The status dot keeps the row's right edge until the pointer is
-            // on it; while renaming, the panel must stay put.
+            // Hidden until the pointer is on the row; while renaming, the panel
+            // must stay put.
             !isEditing && 'opacity-0 group-hover:opacity-100 focus-within:opacity-100',
           )}
           sessionId={session.id}
