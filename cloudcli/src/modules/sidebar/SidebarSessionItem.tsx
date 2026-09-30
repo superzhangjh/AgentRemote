@@ -152,12 +152,13 @@ function SidebarSessionItem({
           selectSession();
         }}
       >
-        {/* The open session's only marker: a bar at its far left. The tinted
-            background it used to get competed with the pinned projects. */}
+        {/* The open session's only marker: a short orange bar at its far left.
+            The tinted background it used to get competed with the pin, and the
+            full-height bar read as a divider between rows. */}
         {isSelected && (
           <span
             aria-hidden="true"
-            className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary"
+            className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-orange-500"
           />
         )}
 

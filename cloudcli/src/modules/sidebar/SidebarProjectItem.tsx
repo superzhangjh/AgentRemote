@@ -181,14 +181,31 @@ function SidebarProjectItem({
         }}
         title={isEditing ? undefined : rowTitle}
         className={cn(
-          'mx-3 flex cursor-pointer select-none items-center gap-2 rounded-lg pl-1 pr-0 transition-colors',
+          'relative mx-3 flex cursor-pointer select-none items-center gap-2 rounded-lg pl-1 pr-0 transition-colors',
           isCompact ? 'py-2' : 'py-1.5',
-          // Selection adds no styling of its own — only a pinned project has a
-          // background, so the list reads as one thing instead of three
-          // competing states.
-          isStarred ? 'bg-muted/70 hover:bg-muted' : 'hover:bg-accent/40',
+          // The background is owned by one thing only: pinning. Hover and
+          // selection deliberately do not touch it, so a pinned row looks the
+          // same before, during and after being opened.
+          isStarred ? 'bg-muted/80' : 'hover:bg-accent/40',
         )}
       >
+        {/* Status of the project's sessions, in the sidebar gutter at the row's
+            leading edge: left of everything, and outside the padding box so it
+            never shifts the name or the session indentation. */}
+        {isProcessing ? (
+          <span
+            className="absolute -left-2.5 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center"
+            title={t('tooltips.processingSessionIndicator', { defaultValue: 'Processing session' })}
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-500" />
+          </span>
+        ) : hasUnread ? (
+          <span
+            className="absolute -left-1.5 top-1/2 h-2 w-2 -translate-y-1/2 animate-pulse rounded-full bg-amber-500"
+            title={t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })}
+          />
+        ) : null}
+
         <Folder className="h-4 w-4 shrink-0 text-muted-foreground/80" />
 
         {isEditing ? (
@@ -245,20 +262,6 @@ function SidebarProjectItem({
         ) : (
           <>
             {tasksEnabled && <TaskIndicator status={taskStatus} size="xs" className="shrink-0" />}
-
-            {isProcessing ? (
-              <span
-                className="flex h-4 w-4 shrink-0 items-center justify-center"
-                title={t('tooltips.processingSessionIndicator', { defaultValue: 'Processing session' })}
-              >
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-500" />
-              </span>
-            ) : hasUnread ? (
-              <span
-                className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-500"
-                title={t('tooltips.attentionRequiredIndicator', { defaultValue: 'Session needs attention' })}
-              />
-            ) : null}
 
             <div className="flex shrink-0 items-center gap-0.5">
               {isExpanded && (
