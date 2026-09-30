@@ -27,7 +27,7 @@ export default function SidebarAgentSelector({ selectedProvider, onProviderChang
 
   return (
     <PillBar
-      className="min-w-0"
+      className="min-w-0 flex-1"
       role="radiogroup"
       aria-label={t('agentSelector.label', 'Agent')}
     >
@@ -44,9 +44,13 @@ export default function SidebarAgentSelector({ selectedProvider, onProviderChang
             aria-checked={isActive}
             aria-label={label}
             title={label}
-            className={cn('h-7 w-8 shrink-0 justify-center px-0 py-0')}
+            // Inline flex sizing: the segments share the row evenly and the
+            // selected one is a little wider, which the class-based
+            // `shrink-0` in Pill would otherwise override.
+            style={{ flexGrow: isActive ? 1.35 : 1, flexShrink: 1, flexBasis: '0%' }}
+            className="h-7 justify-center px-0 py-0"
           >
-            <LLMProviderLogo provider={provider} className="h-4 w-4 shrink-0" />
+            <LLMProviderLogo provider={provider} className={cn('shrink-0', isActive ? 'h-4 w-4' : 'h-3.5 w-3.5')} />
           </Pill>
         );
       })}

@@ -287,10 +287,11 @@
                 0 0 0 1px hsl(var(--nav-float-ring));
   }
 
-  /* Subtle sidebar divider — uses theme tokens */
+  /* Subtle sidebar divider — a solid hairline, inset by the caller when it
+     should line up with a field above it. */
   .nav-divider {
     height: 1px;
-    background: linear-gradient(90deg, transparent, hsl(var(--nav-divider-color)) 20%, hsl(var(--nav-divider-color)) 80%, transparent);
+    background: hsl(var(--nav-divider-color));
   }
 
   /* Nav search input surface — uses theme tokens */

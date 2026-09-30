@@ -184,12 +184,13 @@ function SidebarProjectItem({
         className={cn(
           'mx-2 flex cursor-pointer select-none items-center gap-2 rounded-lg transition-colors',
           isCompact ? 'px-2 py-2' : 'px-2 py-1.5',
-          isSelected
-            ? 'bg-accent text-accent-foreground'
-            : isStarred
-              // Pinned rows are readable as pinned from the list itself; the
-              // pin toggle lives in the options menu, next to rename/remove.
-              ? 'bg-amber-500/10 text-foreground hover:bg-amber-500/15'
+          isStarred
+            // Pinned keeps its tint in every state, including while selected.
+            ? isSelected
+              ? 'bg-muted/60 ring-1 ring-inset ring-border'
+              : 'bg-muted/40 hover:bg-muted/60'
+            : isSelected
+              ? 'bg-accent text-accent-foreground'
               : 'hover:bg-accent/40',
         )}
       >
@@ -264,32 +265,36 @@ function SidebarProjectItem({
               />
             ) : null}
 
-            <button
-              type="button"
-              aria-label={t('sessions.newSession')}
-              title={t('sessions.newSession')}
-              className={cn(iconButtonClass, 'text-foreground')}
-              onClick={(event) => {
-                event.stopPropagation();
-                startNewSession();
-              }}
-            >
-              <SquarePen className="h-4 w-4" />
-            </button>
+            <div className="flex shrink-0 items-center gap-0.5">
+              {isExpanded && (
+                <button
+                  type="button"
+                  aria-label={t('sessions.newSession')}
+                  title={t('sessions.newSession')}
+                  className={cn(iconButtonClass, 'text-muted-foreground hover:text-foreground')}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    startNewSession();
+                  }}
+                >
+                  <SquarePen className={isCompact ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
+                </button>
+              )}
 
-            <button
-              type="button"
-              aria-label={t('projects.projectOptions', { defaultValue: 'Project options' })}
-              aria-haspopup="dialog"
-              aria-expanded={isMobileOptionsOpen}
-              className={cn(iconButtonClass, 'opacity-60 hover:opacity-100')}
-              onClick={(event) => {
-                event.stopPropagation();
-                setIsMobileOptionsOpen(true);
-              }}
-            >
-              <MoreHorizontal className="h-4 w-4" />
-            </button>
+              <button
+                type="button"
+                aria-label={t('projects.projectOptions', { defaultValue: 'Project options' })}
+                aria-haspopup="dialog"
+                aria-expanded={isMobileOptionsOpen}
+                className={cn(iconButtonClass, 'text-muted-foreground hover:text-foreground')}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setIsMobileOptionsOpen(true);
+                }}
+              >
+                <MoreHorizontal className={isCompact ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
+              </button>
+            </div>
           </>
         )}
       </div>

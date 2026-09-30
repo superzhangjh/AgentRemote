@@ -175,38 +175,43 @@ export default function SidebarHeader({
 
       {/* Search */}
       {showSearchTools && (
-        <div className="relative px-3 pt-1.5">
-          <Search className="pointer-events-none absolute left-5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/50" />
-          <Input
-            type="text"
-            placeholder={searchPlaceholder}
-            value={searchFilter}
-            onChange={(event) => onSearchFilterChange(event.target.value)}
-            className="nav-search-input h-8 rounded-lg border-0 pl-8 pr-12 text-sm transition-all duration-200 placeholder:text-muted-foreground/40 focus-visible:ring-0 focus-visible:ring-offset-0"
-          />
-          {searchFilter ? (
-            <button
-              type="button"
-              onClick={onClearSearchFilter}
-              aria-label={t('tooltips.clearSearch')}
-              className="absolute right-4 top-1/2 -translate-y-1/2 rounded-md p-0.5 hover:bg-accent"
-            >
-              <X className="h-3 w-3 text-muted-foreground" />
-            </button>
-          ) : (
-            <kbd
-              aria-hidden
-              title={t('tooltips.openCommandPalette')}
-              className="pointer-events-none absolute right-5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground md:inline-flex"
-            >
-              {MOD_KEY}
-              <span>K</span>
-            </kbd>
-          )}
+        <div className="px-3 pt-1.5">
+          {/* Own relative box: the icon is centred on the input, not on the
+              row including its top padding. */}
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/50" />
+            <Input
+              type="text"
+              placeholder={searchPlaceholder}
+              value={searchFilter}
+              onChange={(event) => onSearchFilterChange(event.target.value)}
+              className="nav-search-input h-8 rounded-lg border-0 pl-8 pr-12 text-sm transition-all duration-200 placeholder:text-muted-foreground/40 focus-visible:ring-0 focus-visible:ring-offset-0"
+            />
+            {searchFilter ? (
+              <button
+                type="button"
+                onClick={onClearSearchFilter}
+                aria-label={t('tooltips.clearSearch')}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-md p-0.5 hover:bg-accent"
+              >
+                <X className="h-3 w-3 text-muted-foreground" />
+              </button>
+            ) : (
+              <kbd
+                aria-hidden
+                title={t('tooltips.openCommandPalette')}
+                className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground md:inline-flex"
+              >
+                {MOD_KEY}
+                <span>K</span>
+              </kbd>
+            )}
+          </div>
         </div>
       )}
 
-      <div className="nav-divider mt-1.5" />
+      {/* Solid, inset to the search field's edges */}
+      <div className="mx-3 mt-1.5 border-b border-border/60" />
     </div>
   );
 }

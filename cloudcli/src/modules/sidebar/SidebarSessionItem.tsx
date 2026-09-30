@@ -140,7 +140,7 @@ function SidebarSessionItem({
         href={`/session/${session.id}`}
         className={cn(
           'flex items-center gap-2 rounded-md text-sm transition-colors',
-          isCompact ? 'py-2 pl-2 pr-1' : 'py-1.5 pl-2 pr-1',
+          isCompact ? 'py-2 pl-2 pr-2' : 'py-1.5 pl-2 pr-2',
           isSelected
             ? 'bg-accent text-accent-foreground'
             : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground',
@@ -164,7 +164,7 @@ function SidebarSessionItem({
               aria-label={t('sessions.sessionOptions', { defaultValue: 'Session options' })}
               aria-haspopup="dialog"
               aria-expanded={isMobileOptionsOpen}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted active:scale-95"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground active:scale-95"
               onClick={(event) => {
                 event.stopPropagation();
                 event.preventDefault();
@@ -184,7 +184,7 @@ function SidebarSessionItem({
       {!isCompact && (
         <SessionOptions
           className={cn(
-            'absolute right-1 top-1/2 -translate-y-1/2 transform transition-all duration-200',
+            'absolute right-2 top-1/2 -translate-y-1/2 transform transition-all duration-200',
             // The status dot keeps the row's right edge until the pointer is
             // on it; while renaming, the panel must stay put.
             !isEditing && 'opacity-0 group-hover:opacity-100 focus-within:opacity-100',

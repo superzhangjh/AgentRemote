@@ -149,7 +149,7 @@ export default function SessionOptions({
           variant="ghost"
           size="icon"
           onOpenChange={setOptionsOpen}
-          triggerClassName="h-7 w-7 text-muted-foreground opacity-70 hover:bg-muted hover:opacity-100"
+          triggerClassName="h-6 w-6 text-muted-foreground hover:bg-accent hover:text-foreground"
           menuClassName="w-[260px] rounded-xl p-1.5 shadow-xl"
           header={(
             <div className="mb-1 border-b border-border px-3 py-2">
