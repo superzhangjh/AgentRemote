@@ -1,7 +1,7 @@
 name: agent_remote
 description: "Android shell for the CloudCLI web interface."
 publish_to: 'none'
-version: 0.1.0
+version: 0.1.0+2002
 
 environment:
   sdk: '>=3.13.0 <4.0.0'

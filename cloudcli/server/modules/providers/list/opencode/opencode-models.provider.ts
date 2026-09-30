@@ -4,9 +4,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import Database from 'better-sqlite3';
-
 import { sessionsDb } from '@/modules/database/index.js';
+import { createOpenCodeServerClient } from '@/modules/providers/list/opencode/opencode-server.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
   ProviderCurrentActiveModel,
@@ -15,7 +14,6 @@ import type {
 } from '@/shared/types.js';
 import {
   buildDefaultProviderCurrentActiveModel,
-  getOpenCodeDatabasePath,
   readObjectRecord,
   readOptionalString,
   readSharedOpenCodeServerUrl,
@@ -419,7 +417,7 @@ const readOpenCodeEffortValues = (
 /**
  * Reads the provider/model catalog from a running OpenCode server.
  *
- * `GET /config/providers` is the source the OpenCode client itself renders
+ * The SDK's `config.providers` is the source the OpenCode client itself renders
  * from, so the models and their reasoning `variants` match the client exactly -
  * unlike the curated catalog, which only covers a subset. Returns null when the
  * server is unreachable or reports no models, so the caller keeps its fallback.
@@ -427,16 +425,14 @@ const readOpenCodeEffortValues = (
 const readOpenCodeServerModelOptions = async (
   serverUrl: string,
 ): Promise<ProviderModelOption[] | null> => {
-  const baseUrl = serverUrl.replace(/\/+$/, '');
   let payload: Record<string, unknown>;
   try {
-    const response = await fetch(`${baseUrl}/config/providers`, {
+    const client = createOpenCodeServerClient({ url: serverUrl, headers: {} });
+    const result = await client.config.providers({}, {
+      throwOnError: true,
       signal: AbortSignal.timeout(OPENCODE_SERVER_REQUEST_TIMEOUT_MS),
     });
-    if (!response.ok) {
-      return null;
-    }
-    payload = readObjectRecord(await response.json()) ?? {};
+    payload = readObjectRecord(result.data) ?? {};
   } catch {
     return null;
   }
@@ -557,45 +553,25 @@ export class OpenCodeProviderModels implements IProviderModels {
       return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
     }
 
-    // OpenCode's `session` table is keyed by its own session id, so the stable
-    // app id has to be translated first; sessions discovered on disk store the
-    // provider id in both columns and resolve to themselves.
-    const providerSessionId = sessionsDb.getSessionById(sessionId)?.provider_session_id ?? sessionId;
+    // The server keys sessions by OpenCode's own id, so the stable app id has
+    // to be translated first; sessions discovered on disk store the provider id
+    // in both columns and resolve to themselves. The project path scopes the
+    // lookup to the session's own project when the server hosts several.
+    const session = sessionsDb.getSessionById(sessionId);
+    const providerSessionId = session?.provider_session_id ?? sessionId;
+    const directory = session?.project_path ?? undefined;
 
     try {
-      const dbPath = getOpenCodeDatabasePath();
-      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-
-      try {
-        const row = db.prepare(`
-          SELECT
-            s.id AS sessionId,
-            s.model AS model,
-            s.agent AS agent,
-            s.directory AS directory,
-            s.time_updated AS timeUpdated,
-            s.time_created AS timeCreated
-          FROM session s
-          WHERE s.id = ?
-          ORDER BY COALESCE(s.time_updated, s.time_created, 0) DESC
-          LIMIT 1
-        `).get(providerSessionId) as {
-          sessionId?: string;
-          model?: unknown;
-          agent?: string | null;
-          directory?: string | null;
-          timeUpdated?: number | null;
-          timeCreated?: number | null;
-        } | undefined;
-
-        const model = parseOpenCodeSessionModelValue(row?.model);
-        if (model) {
-          return {
-            model,
-          };
-        }
-      } finally {
-        db.close();
+      // The server is the source of truth for a session's active model; the
+      // curated default only covers sessions the server no longer knows.
+      const client = createOpenCodeServerClient();
+      const result = await client.session.get(
+        { sessionID: providerSessionId, directory },
+        { throwOnError: true },
+      );
+      const model = parseOpenCodeSessionModelValue(readObjectRecord(result.data)?.model);
+      if (model) {
+        return { model };
       }
     } catch {
       // Fall through to the curated default when OpenCode session lookup fails.

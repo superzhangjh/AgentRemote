@@ -3,7 +3,6 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import Database from 'better-sqlite3';
 import { closeConnection, initializeDatabase } from '@/modules/database/index.js';
 
 import {
@@ -133,7 +132,7 @@ test('OpenCode reads models and reasoning variants from a running server', async
     const originalFetch = globalThis.fetch;
     let requestedUrl = '';
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
-      requestedUrl = String(input);
+      requestedUrl = input instanceof Request ? input.url : String(input);
       return new Response(JSON.stringify({
         providers: [
           {
@@ -177,23 +176,26 @@ test('OpenCode reads models and reasoning variants from a running server', async
 });
 
 test('OpenCode session model keeps its provider prefix', async () => {
-  await withOpenCodeHome(async (homeDir) => {
-    const dbDir = path.join(homeDir, '.local', 'share', 'opencode');
-    await mkdir(dbDir, { recursive: true });
-    const db = new Database(path.join(dbDir, 'opencode.db'));
-    try {
-      db.exec('CREATE TABLE session (id TEXT, model TEXT, agent TEXT, directory TEXT, time_updated INTEGER, time_created INTEGER)');
-      db.prepare('INSERT INTO session (id, model) VALUES (?, ?)').run(
-        'ses_model',
-        JSON.stringify({ id: 'deepseek-v4.1-flash', providerID: 'opencode-go', variant: 'high' }),
-      );
-    } finally {
-      db.close();
-    }
-  }, async (adapter) => {
+  await withOpenCodeHome(async () => {}, async (adapter) => {
     const previousDatabasePath = process.env.DATABASE_PATH;
+    const previousServerUrl = process.env.OPENCODE_SERVER_URL;
+    const originalFetch = globalThis.fetch;
     closeConnection();
     process.env.DATABASE_PATH = path.join(os.homedir(), 'cloudcli.db');
+    process.env.OPENCODE_SERVER_URL = 'http://127.0.0.1:4096';
+    // The session's active model comes from the server's session record; the
+    // SDK turns its `{ providerID, id }` pair into a `provider/model` route.
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes('/session/ses_model')) {
+        return new Response(JSON.stringify({
+          id: 'ses_model',
+          model: { id: 'deepseek-v4.1-flash', providerID: 'opencode-go', variant: 'high' },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+
     try {
       await initializeDatabase();
       assert.equal(
@@ -201,9 +203,12 @@ test('OpenCode session model keeps its provider prefix', async () => {
         'opencode-go/deepseek-v4.1-flash',
       );
     } finally {
+      globalThis.fetch = originalFetch;
       closeConnection();
       if (previousDatabasePath === undefined) delete process.env.DATABASE_PATH;
       else process.env.DATABASE_PATH = previousDatabasePath;
+      if (previousServerUrl === undefined) delete process.env.OPENCODE_SERVER_URL;
+      else process.env.OPENCODE_SERVER_URL = previousServerUrl;
     }
   });
 });

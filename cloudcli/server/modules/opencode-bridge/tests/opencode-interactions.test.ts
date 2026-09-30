@@ -24,7 +24,7 @@ async function waitUntil(check: () => boolean): Promise<void> {
   assert.fail('The bridge did not deliver the expected interaction.');
 }
 
-test('global bridge restores project approvals, answers each protocol and keeps failed replies retryable', async () => {
+test('bridge restores approvals over the v2 API, answers them and keeps failed replies retryable', async () => {
   const tempDirectory = await mkdtemp(path.join(os.tmpdir(), 'opencode-interactions-'));
   const previousEnvironment = {
     DATABASE_PATH: process.env.DATABASE_PATH,
@@ -33,9 +33,7 @@ test('global bridge restores project approvals, answers each protocol and keeps 
     OPENCODE_BRIDGE_DISABLED: process.env.OPENCODE_BRIDGE_DISABLED,
   };
   const permissions: Request[] = [{ id: 'restore-permission', sessionID: NATIVE_ID, permission: 'bash', metadata: { command: 'npm test' }, patterns: ['npm test'] }];
-  const v2Permissions: Request[] = [];
   const questions: Request[] = [];
-  const v2Questions: Request[] = [];
   const frames: Request[] = [];
   const posts: Array<{ path: string; directory: string | null; body: unknown }> = [];
   const streams = new Set<ServerResponse>();
@@ -43,15 +41,15 @@ test('global bridge restores project approvals, answers each protocol and keeps 
   let connections = 0;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
-    if (url.pathname === '/global/event') {
+    if (url.pathname === '/api/event') {
       connections++;
       response.writeHead(200, { 'Content-Type': 'text/event-stream' });
-      response.write(`data: ${JSON.stringify({ directory: 'global', payload: { type: 'server.connected', properties: {} } })}\n\n`);
+      response.write(`data: ${JSON.stringify({ id: 'evt-1', type: 'server.connected', data: {} })}\n\n`);
       streams.add(response);
       response.on('close', () => streams.delete(response));
       return;
     }
-    const directory = url.searchParams.get('directory') ?? url.searchParams.get('location[directory]');
+    const directory = url.searchParams.get('location[directory]') ?? url.searchParams.get('directory');
     response.setHeader('Content-Type', 'application/json');
     if (request.method === 'POST') {
       let body = '';
@@ -65,19 +63,17 @@ test('global bridge restores project approvals, answers each protocol and keeps 
       }
       // A real server drops an answered request from its pending list, so a
       // reconnect snapshot taken after the reply cannot resurrect the prompt.
-      for (const list of [permissions, v2Permissions, questions, v2Questions]) {
+      for (const list of [permissions, questions]) {
         const index = list.findIndex((entry) => url.pathname.includes(String(entry.id)));
         if (index !== -1) list.splice(index, 1);
       }
-      response.end('true');
+      response.end('{"data":{}}');
       return;
     }
     const inProject = directory === DIRECTORY;
-    const data = url.pathname === '/session/status' ? inProject ? { [NATIVE_ID]: { type: 'busy' } } : {}
-      : url.pathname === '/permission' ? inProject ? permissions : []
-        : url.pathname === '/question' ? inProject ? questions : []
-          : url.pathname === '/api/permission/request' ? { data: inProject ? v2Permissions : [] }
-            : url.pathname === '/api/question/request' ? { data: inProject ? v2Questions : [] } : [];
+    const data = url.pathname === '/api/session/active' ? { data: { [NATIVE_ID]: { type: 'running' } } }
+      : url.pathname === '/api/permission/request' ? { data: inProject ? permissions : [] }
+        : url.pathname === '/api/question/request' ? { data: inProject ? questions : [] } : { data: [] };
     response.end(JSON.stringify(data));
   });
 
@@ -114,12 +110,13 @@ test('global bridge restores project approvals, answers each protocol and keeps 
     openCodePermissionGateway.resolve('restore-permission', { allow: true, rememberEntry: 'npm test' });
     await waitUntil(() => openCodePermissionGateway.listPending(APP_ID).length === 0);
     assert.deepEqual(posts.at(-1), {
-      path: '/permission/restore-permission/reply', directory: DIRECTORY, body: { reply: 'always' },
+      path: `/api/session/${NATIVE_ID}/permission/restore-permission/reply`, directory: null,
+      body: { reply: 'always' },
     });
     permissions.length = 0;
 
     // No permission event arrives while disconnected: recovery must list it.
-    v2Permissions.push({ id: 'v2-restored', sessionID: NATIVE_ID, action: 'read', resources: ['/tmp/log'] });
+    permissions.push({ id: 'v2-restored', sessionID: NATIVE_ID, action: 'read', resources: ['/tmp/log'] });
     for (const stream of streams) stream.end();
     await waitUntil(() => connections === 2 && openCodePermissionGateway.listPending(APP_ID).length === 1);
     openCodePermissionGateway.resolve('v2-restored', { allow: false, message: 'Denied on phone' });
@@ -128,34 +125,34 @@ test('global bridge restores project approvals, answers each protocol and keeps 
       path: `/api/session/${NATIVE_ID}/permission/v2-restored/reply`, directory: null,
       body: { reply: 'reject', message: 'Denied on phone' },
     });
-    v2Permissions.length = 0;
+    permissions.length = 0;
 
-    handleOpenCodeEvent({ directory: DIRECTORY, payload: {
-      type: 'permission.updated', properties: { id: 'old-permission', sessionID: NATIVE_ID, title: 'Old Bash' },
+    handleOpenCodeEvent({ location: { directory: DIRECTORY }, type: 'permission.asked', properties: {
+      id: 'asked-permission', sessionID: NATIVE_ID, permission: 'bash', patterns: ['rm -rf /tmp/x'],
     } });
-    openCodePermissionGateway.resolve('old-permission', { allow: true });
+    openCodePermissionGateway.resolve('asked-permission', { allow: true });
     await waitUntil(() => openCodePermissionGateway.listPending(APP_ID).length === 0);
-    assert.equal(posts.at(-1)?.path, `/session/${NATIVE_ID}/permissions/old-permission`);
-    assert.equal(posts.at(-1)?.directory, DIRECTORY);
+    assert.equal(posts.at(-1)?.path, `/api/session/${NATIVE_ID}/permission/asked-permission/reply`);
 
     questions.push({ id: 'question-fallback', sessionID: NATIVE_ID, tool: { callID: 'tool-question' },
       questions: [{ question: 'Choose targets', header: 'Targets', multiple: true, options: [] }] });
     // The session id lives in `part`, not the event's top-level properties.
-    handleOpenCodeEvent({ directory: DIRECTORY, payload: { type: 'message.part.updated', properties: {
+    handleOpenCodeEvent({ location: { directory: DIRECTORY }, type: 'message.part.updated', properties: {
       part: { sessionID: NATIVE_ID, type: 'tool', tool: 'question', callID: 'tool-question', state: { status: 'running' } },
-    } } });
+    } });
     await waitUntil(() => openCodePermissionGateway.listPending(APP_ID).length === 1);
     assert.equal(listExternalBusySessions().find((entry) => entry.sessionId === APP_ID)?.statusText, '等待回答');
     openCodePermissionGateway.resolve('question-fallback', { allow: true, updatedInput: { answers: { 'Choose targets': 'Phone, Desktop' } } });
     await waitUntil(() => openCodePermissionGateway.listPending(APP_ID).length === 0);
     assert.deepEqual(posts.at(-1), {
-      path: '/question/question-fallback/reply', directory: DIRECTORY, body: { answers: [['Phone', 'Desktop']] },
+      path: `/api/session/${NATIVE_ID}/question/question-fallback/reply`, directory: null,
+      body: { answers: [['Phone', 'Desktop']] },
     });
     questions.length = 0;
 
-    handleOpenCodeEvent({ directory: DIRECTORY, payload: {
-      type: 'question.v2.asked', properties: { id: 'v2-question', sessionID: NATIVE_ID,
-        questions: [{ question: 'Continue?', header: 'Next', options: [] }] },
+    handleOpenCodeEvent({ location: { directory: DIRECTORY }, type: 'question.v2.asked', properties: {
+      id: 'v2-question', sessionID: NATIVE_ID,
+      questions: [{ question: 'Continue?', header: 'Next', options: [] }],
     } });
     openCodePermissionGateway.resolve('v2-question', { allow: true, updatedInput: { answers: { 'Continue?': 'Yes' } } });
     await waitUntil(() => openCodePermissionGateway.listPending(APP_ID).length === 0);

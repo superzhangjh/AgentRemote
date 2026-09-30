@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { resolveServerConfig } from '@/modules/opencode-bridge/opencode-bridge.service.js';
+import { resolveServerConfig, resolveServerConfigs } from '@/modules/opencode-bridge/opencode-bridge.service.js';
 
 /**
  * Runs `run` with the AgentRemote OpenCode server descriptor pointed at
@@ -87,5 +87,39 @@ test('an unreadable descriptor is ignored', () => {
     restore('OPENCODE_SERVER_URL', previousUrl);
     restore('OPENCODE_SERVER_PASSWORD', previousPassword);
     restore('OPENCODE_SERVER_USERNAME', previousUser);
+  }
+});
+
+test('resolveServerConfigs discovers a v2 background service descriptor', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-home-'));
+  const stateDir = path.join(home, '.local', 'state', 'opencode');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, 'service.json'),
+    JSON.stringify({ url: 'http://127.0.0.1:49999', password: 'pw' }),
+  );
+  const previousHome = process.env.HOME;
+  const previousFile = process.env.AGENT_REMOTE_OPENCODE_STATE_FILE;
+  const previousUrl = process.env.OPENCODE_SERVER_URL;
+  const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
+
+  process.env.HOME = home;
+  process.env.AGENT_REMOTE_OPENCODE_STATE_FILE = path.join(home, 'missing.json');
+  delete process.env.OPENCODE_SERVER_URL;
+  delete process.env.OPENCODE_SERVER_PASSWORD;
+
+  try {
+    const configs = resolveServerConfigs();
+    const service = configs.find((config) => config.url === 'http://127.0.0.1:49999');
+    assert.ok(service, `expected the service descriptor, saw ${configs.map((config) => config.url).join(', ')}`);
+    assert.deepEqual(service?.headers, {
+      Authorization: `Basic ${Buffer.from('opencode:pw', 'utf8').toString('base64')}`,
+    });
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    restore('HOME', previousHome);
+    restore('AGENT_REMOTE_OPENCODE_STATE_FILE', previousFile);
+    restore('OPENCODE_SERVER_URL', previousUrl);
+    restore('OPENCODE_SERVER_PASSWORD', previousPassword);
   }
 });

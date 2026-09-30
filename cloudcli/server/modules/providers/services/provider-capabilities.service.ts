@@ -90,9 +90,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
   },
   opencode: {
     provider: 'opencode',
-    // Mapped by the runtime onto OpenCode's controls: `--agent plan` (plan),
-    // `--auto` (bypassPermissions) and the OPENCODE_PERMISSION env var
-    // (acceptEdits). See resolveOpenCodePermissionOptions in the OpenCode runtime adapter.
+    // Mapped by the runtime onto the shared OpenCode server: the read-only
+    // `plan` agent (plan) and session permission rulesets (bypassPermissions,
+    // acceptEdits). See resolveOpenCodePermissionRuleset in the OpenCode runtime adapter.
     permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
     defaultPermissionMode: 'default',
     supportsImages: true,

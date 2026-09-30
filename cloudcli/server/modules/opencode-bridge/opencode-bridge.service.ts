@@ -1,4 +1,7 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
@@ -26,6 +29,8 @@ type OpenCodeEventShape = {
   properties?: Record<string, unknown>;
   data?: Record<string, unknown>;
   directory?: string;
+  /** v2 events carry the project directory under `location`. */
+  location?: Record<string, unknown>;
   payload?: OpenCodeEventShape;
 };
 
@@ -48,9 +53,23 @@ type OpenCodeQuestion = {
   multiSelect: boolean;
 };
 
-let client: OpenCodeClient | null = null;
+/**
+ * One OpenCode server the bridge mirrors.
+ *
+ * Several can run at once — the console-managed `opencode serve` plus each
+ * desktop app's background service — so every server keeps its own client and
+ * event loop. The v2 API is used everywhere because both 1.18 and 2.0 expose it.
+ */
+type OpenCodeServer = {
+  config: OpenCodeServerConfig;
+  client: OpenCodeClient;
+};
+
+let servers: OpenCodeServer[] = [];
 let bridgeAbortController: AbortController | null = null;
 let started = false;
+/** Provider-native ids each server reports active, so one server's snapshot cannot clear another's. */
+const activeProviderSessionsByServer = new Map<string, Set<string>>();
 /** Provider-native ids the last snapshot (or event) reported as busy. */
 const busyProviderSessions = new Set<string>();
 /** Permission ids already announced, so one approval prompt notifies once. */
@@ -81,11 +100,12 @@ type OpenCodePendingPermission = {
   sessionId: string;
   directory?: string;
   appSessionId: string;
+  /** URL of the server that raised the prompt, so the reply goes back to it. */
+  serverUrl: string;
   toolName: string;
   input: unknown;
   context: unknown;
   receivedAt: Date;
-  protocol: 'legacy' | 'current' | 'v2';
 };
 
 /**
@@ -103,9 +123,10 @@ type OpenCodePendingQuestion = {
   sessionId: string;
   directory?: string;
   appSessionId: string;
+  /** URL of the server that raised the question, so the reply goes back to it. */
+  serverUrl: string;
   questions: OpenCodeQuestion[];
   receivedAt: Date;
-  protocol: 'current' | 'v2';
 };
 
 /**
@@ -164,7 +185,9 @@ function discoverRunningServer(): { port: string | null; password: string | null
     });
 
     for (const line of output.split('\n')) {
-      if (!line.includes('opencode') || !line.includes('serve')) {
+      // Only an actual `opencode serve` invocation, not an unrelated process
+      // that merely inherited the variable and mentions both words.
+      if (!/opencode(\.js)?\s+serve/.test(line)) {
         continue;
       }
 
@@ -173,7 +196,11 @@ function discoverRunningServer(): { port: string | null; password: string | null
         continue;
       }
 
-      const port = line.match(/--port=(\d+)/)?.[1] ?? null;
+      // The CLI accepts both `--port=1234` and `--port 1234`.
+      const port = line.match(/--port[= ](\d+)/)?.[1] ?? null;
+      if (!port) {
+        continue;
+      }
       return { port, password };
     }
   } catch {
@@ -183,42 +210,136 @@ function discoverRunningServer(): { port: string | null; password: string | null
   return { port: null, password: null };
 }
 
+/** Reads a v2 background service's `service.json` descriptor (`url` + `password`). */
+function readServiceDescriptor(filePath: string): OpenCodeServerConfig | null {
+  if (!existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+    const url = readString(parsed.url);
+    if (!url) {
+      return null;
+    }
+
+    const password = typeof parsed.password === 'string' ? parsed.password : '';
+    return { url, headers: buildAuthHeaders('opencode', password) };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Resolves the server CloudCLI should mirror. Explicit environment variables
- * win; otherwise the AgentRemote console's advertised server is used, then the
- * running `opencode serve` process is discovered, and only then does it fall
- * back to the CLI's conventional port with no auth.
+ * Discovers the OpenCode v2 background services the desktop apps run.
  *
- * Exported for the module's tests.
+ * Each service writes `service.json` (url + password) under its own
+ * `XDG_STATE_HOME/opencode`. Running `opencode-cli serve --service` processes
+ * advertise that state home in their environment, and the default and
+ * profile-scoped locations are checked directly as a fallback.
  */
-export function resolveServerConfig(): OpenCodeServerConfig {
+function discoverServiceServers(): OpenCodeServerConfig[] {
+  const descriptors: string[] = [];
+  const seenHomes = new Set<string>();
+  const addDescriptor = (stateHome: string) => {
+    if (!stateHome || seenHomes.has(stateHome)) {
+      return;
+    }
+    seenHomes.add(stateHome);
+    descriptors.push(path.join(stateHome, 'opencode', 'service.json'));
+  };
+
+  try {
+    const output = execFileSync('ps', ['eww', '-ax'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    for (const line of output.split('\n')) {
+      if (!line.includes('opencode-cli') || !line.includes('serve')) {
+        continue;
+      }
+      const stateHome = line.match(/XDG_STATE_HOME=(\S+)/)?.[1];
+      if (stateHome) {
+        addDescriptor(stateHome);
+        continue;
+      }
+      const home = line.match(/(?:^|\s)HOME=(\S+)/)?.[1];
+      if (home) {
+        addDescriptor(path.join(home, '.local', 'state'));
+      }
+    }
+  } catch {
+    // Process discovery is best-effort; the fixed locations below still apply.
+  }
+
+  const home = os.homedir();
+  addDescriptor(path.join(home, '.local', 'state'));
+  addDescriptor(path.join(home, '.config'));
+  try {
+    for (const entry of readdirSync(path.join(home, '.opencode-profiles'))) {
+      addDescriptor(path.join(home, '.opencode-profiles', entry, 'state'));
+      addDescriptor(path.join(home, '.opencode-profiles', entry, 'config'));
+    }
+  } catch {
+    // No profile directory; nothing more to add.
+  }
+
+  const configs: OpenCodeServerConfig[] = [];
+  for (const descriptor of descriptors) {
+    const config = readServiceDescriptor(descriptor);
+    if (config) {
+      configs.push(config);
+    }
+  }
+  return configs;
+}
+
+/**
+ * Resolves every OpenCode server CloudCLI should mirror.
+ *
+ * Explicit environment variables pin a single server. Otherwise the console's
+ * advertised `opencode serve`, the desktop apps' v2 background services, and any
+ * `opencode serve` discoverable through the process table are all included, so a
+ * turn started on any of them reaches the phone. The v2 API is used against all
+ * of them, because both 1.18 and 2.0 expose it.
+ */
+export function resolveServerConfigs(): OpenCodeServerConfig[] {
   const configuredUrl = process.env.OPENCODE_SERVER_URL?.trim();
   const configuredPassword = process.env.OPENCODE_SERVER_PASSWORD;
   if (configuredUrl || configuredPassword) {
-    return {
+    return [{
       url: configuredUrl || DEFAULT_SERVER_URL,
       headers: buildAuthHeaders(process.env.OPENCODE_SERVER_USERNAME, configuredPassword),
-    };
+    }];
   }
 
-  // The AgentRemote console advertises its long-lived `opencode serve` instance
-  // in a descriptor file. Prefer it over process discovery: the managed server
-  // runs without OPENCODE_SERVER_PASSWORD, and discovery keys on that variable,
-  // so it would miss the real server and fall back to the default port.
+  const configs: OpenCodeServerConfig[] = [];
   const sharedUrl = readSharedOpenCodeServerUrl();
   if (sharedUrl) {
-    return { url: sharedUrl, headers: {} };
+    configs.push({ url: sharedUrl, headers: {} });
   }
+  configs.push(...discoverServiceServers());
 
   const discovered = discoverRunningServer();
   if (discovered.password) {
-    return {
+    configs.push({
       url: `http://127.0.0.1:${discovered.port ?? '4096'}`,
       headers: buildAuthHeaders(process.env.OPENCODE_SERVER_USERNAME, discovered.password),
-    };
+    });
   }
 
-  return { url: DEFAULT_SERVER_URL, headers: {} };
+  const unique = new Map<string, OpenCodeServerConfig>();
+  for (const config of configs) {
+    if (!unique.has(config.url)) {
+      unique.set(config.url, config);
+    }
+  }
+  if (unique.size === 0) {
+    unique.set(DEFAULT_SERVER_URL, { url: DEFAULT_SERVER_URL, headers: {} });
+  }
+  return [...unique.values()];
+}
+
+/** The primary server, used by callers that mirror a single instance. */
+export function resolveServerConfig(): OpenCodeServerConfig {
+  return resolveServerConfigs()[0];
 }
 
 /** Maps a provider-native session id onto the app-facing id CloudCLI stores. */
@@ -394,7 +515,7 @@ function normalizeOpenCodeQuestions(raw: unknown): OpenCodeQuestion[] {
 function registerPendingPermission(
   properties: Record<string, unknown>,
   directory: string | undefined,
-  protocol: OpenCodePendingPermission['protocol'],
+  serverUrl: string,
 ): void {
   const permissionId = readString(properties.id);
   const sessionId = readString(properties.sessionID) ?? readString(properties.sessionId);
@@ -409,12 +530,12 @@ function registerPendingPermission(
     sessionId,
     directory: resolveSessionDirectory(sessionId, directory),
     appSessionId,
+    serverUrl,
     toolName: readString(properties.title) ?? readString(properties.permission)
       ?? readString(properties.action) ?? readString(properties.type) ?? 'Tool',
     input: readRecord(properties.metadata) ?? undefined,
     context: properties.pattern ?? properties.patterns ?? properties.resources,
     receivedAt: new Date(),
-    protocol,
   };
   pendingPermissions.set(permissionId, entry);
   if (rememberId(announcedPermissions, permissionId)) {
@@ -458,8 +579,8 @@ function registerPendingQuestion(
   requestId: string,
   sessionId: string,
   questions: OpenCodeQuestion[],
+  serverUrl: string,
   directory?: string,
-  protocol: OpenCodePendingQuestion['protocol'] = 'current',
 ): void {
   if (!requestId || questions.length === 0 || pendingQuestions.has(requestId)
     || resolvedInteractions.has(requestId)) {
@@ -472,9 +593,9 @@ function registerPendingQuestion(
     sessionId,
     directory: resolveSessionDirectory(sessionId, directory),
     appSessionId,
+    serverUrl,
     questions,
     receivedAt: new Date(),
-    protocol,
   };
   pendingQuestions.set(requestId, entry);
 
@@ -491,18 +612,21 @@ function registerPendingQuestion(
  * `question` tool part causes one list call; the request whose `tool.callID`
  * matches the part is the one being rendered.
  */
-async function reconcilePendingQuestions(sessionId: string, callId: string | null, directory?: string): Promise<void> {
-  const activeClient = client;
-  if (!activeClient) {
-    return;
-  }
-
+async function reconcilePendingQuestions(
+  sessionId: string,
+  callId: string | null,
+  directory: string | undefined,
+  server: OpenCodeServer,
+): Promise<void> {
   // The part can become `running` a beat before the server registers the
   // request, so retry briefly instead of giving up on the first empty list.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const result = await activeClient.question.list({ directory }, { throwOnError: true });
-      const requests = Array.isArray(result.data) ? result.data : [];
+      const result = await server.client.v2.question.request.list(
+        { location: { directory } },
+        { throwOnError: true },
+      );
+      const requests = readRequestList(result.data);
       let registered = false;
       for (const request of requests) {
         const requestId = readString(request?.id);
@@ -512,10 +636,16 @@ async function reconcilePendingQuestions(sessionId: string, callId: string | nul
         if (request.sessionID !== sessionId) {
           continue;
         }
-        if (callId && readString(request?.tool?.callID) !== callId) {
+        if (callId && readString(readRecord(request.tool)?.callID) !== callId) {
           continue;
         }
-        registerPendingQuestion(requestId, sessionId, normalizeOpenCodeQuestions(request?.questions), directory);
+        registerPendingQuestion(
+          requestId,
+          sessionId,
+          normalizeOpenCodeQuestions(request?.questions),
+          server.config.url,
+          directory,
+        );
         registered = true;
       }
       if (registered) {
@@ -610,24 +740,14 @@ function notifyUserOfQuestion(sessionId: string, question: string | null): void 
   });
 }
 
-/** Extracts the visible question text from a `question` tool part. */
-function readQuestionText(part: Record<string, unknown>): string | null {
-  const state = readRecord(part.state);
-  const input = readRecord(state?.input);
-  const questions = Array.isArray(input?.questions) ? input.questions : [];
-  for (const entry of questions) {
-    const record = readRecord(entry);
-    const question = readString(record?.question) ?? readString(record?.header);
-    if (question) {
-      return question;
-    }
-  }
-
-  return readString(input?.question);
-}
-
 /** Consumed by bridge tests to verify provider event normalization and approval delivery. */
-export function handleOpenCodeEvent(event: OpenCodeEventShape): void {
+export function handleOpenCodeEvent(
+  event: OpenCodeEventShape,
+  server: OpenCodeServer | null = servers[0] ?? null,
+): void {
+  if (!server) {
+    return;
+  }
   const payload = event.payload ?? event;
   const properties = readRecord(payload.properties) ?? readRecord(payload.data);
   const sessionId = readString(properties?.sessionID) ?? readString(properties?.sessionId)
@@ -635,7 +755,8 @@ export function handleOpenCodeEvent(event: OpenCodeEventShape): void {
   if (!sessionId) {
     return;
   }
-  const directory = readString(event.directory) ?? undefined;
+  // v1 events carry `directory`; v2 events carry it under `location`.
+  const directory = readString(event.directory) ?? readString(readRecord(event.location)?.directory) ?? undefined;
   if (directory) {
     sessionDirectories.set(sessionId, directory);
   }
@@ -653,8 +774,7 @@ export function handleOpenCodeEvent(event: OpenCodeEventShape): void {
   }
 
   if (payload.type === 'permission.updated' || payload.type === 'permission.asked' || payload.type === 'permission.v2.asked') {
-    registerPendingPermission(properties ?? {}, directory,
-      payload.type === 'permission.updated' ? 'legacy' : payload.type === 'permission.v2.asked' ? 'v2' : 'current');
+    registerPendingPermission(properties ?? {}, directory, server.config.url);
     return;
   }
 
@@ -678,8 +798,8 @@ export function handleOpenCodeEvent(event: OpenCodeEventShape): void {
       readString(properties?.id) ?? '',
       sessionId,
       normalizeOpenCodeQuestions(properties?.questions),
+      server.config.url,
       directory,
-      payload.type === 'question.v2.asked' ? 'v2' : 'current',
     );
     return;
   }
@@ -705,11 +825,7 @@ export function handleOpenCodeEvent(event: OpenCodeEventShape): void {
       // reconcile against the server's pending list using this part's call id.
       // `registerPendingQuestion` dedupes, so repeated updates are harmless.
       const callId = readString(part.callID);
-      if (client) {
-        void reconcilePendingQuestions(sessionId, callId, directory);
-      } else {
-        notifyUserOfQuestion(sessionId, readQuestionText(part));
-      }
+      void reconcilePendingQuestions(sessionId, callId, directory, server);
     }
   }
 }
@@ -720,93 +836,110 @@ function readRequestList(data: unknown): Record<string, unknown>[] {
   return Array.isArray(requests) ? requests.map(readRecord).filter((entry) => entry !== null) : [];
 }
 
-/** Restores activity and pending prompts after startup or a stream reconnection. */
-async function syncStatusSnapshot(activeClient: OpenCodeClient, signal: AbortSignal): Promise<void> {
+/**
+ * Restores activity and pending prompts after startup or a stream reconnection.
+ *
+ * Activity comes from the v2 `session/active` list, which is global per server;
+ * pending approvals/questions are location-scoped, so each known directory is
+ * queried once and reconciled against the bridge's own pending maps.
+ */
+async function syncStatusSnapshot(server: OpenCodeServer, signal: AbortSignal): Promise<void> {
+  const options = { signal, throwOnError: true as const };
+
+  // Busy sessions: `session/active` lists the foreground drains this server
+  // owns, so a session is busy exactly when it is present. A session blocked on
+  // an approval is added back below so the activity flip cannot drop its prompt.
+  const activeResult = await Promise.allSettled([server.client.v2.session.active(options)]);
+  if (signal.aborted) {
+    return;
+  }
+  const previousActive = activeProviderSessionsByServer.get(server.config.url) ?? new Set<string>();
+  const activeIds = new Set<string>();
+  if (activeResult[0].status === 'fulfilled') {
+    for (const providerSessionId of Object.keys(readRecord(activeResult[0].value.data) ?? {})) {
+      activeIds.add(providerSessionId);
+      applySessionActivity(providerSessionId, true);
+    }
+  } else {
+    // A failed query cannot establish that an unseen run is idle; keep the
+    // previous set so the next snapshot reconciles it.
+    for (const providerSessionId of previousActive) {
+      activeIds.add(providerSessionId);
+    }
+  }
+  for (const entry of [...pendingPermissions.values(), ...pendingQuestions.values()]) {
+    if (entry.serverUrl === server.config.url) {
+      activeIds.add(entry.sessionId);
+    }
+  }
+  for (const providerSessionId of previousActive) {
+    if (!activeIds.has(providerSessionId)) {
+      applySessionActivity(providerSessionId, false);
+    }
+  }
+  activeProviderSessionsByServer.set(server.config.url, activeIds);
+
+  // Pending approvals/questions, reconciled per directory.
   const directories = new Set<string | undefined>([undefined, ...sessionDirectories.values()]);
   for (const session of sessionsDb.getAllSessions()) {
     if (session.provider === PROVIDER && session.project_path) {
       directories.add(session.project_path);
     }
   }
-  const seen = new Set<string>();
-  let allStatusesRead = true;
   for (const directory of directories) {
-    const options = { signal, throwOnError: true as const };
     const results = await Promise.allSettled([
-      activeClient.session.status({ directory }, options),
-      activeClient.permission.list({ directory }, options),
-      activeClient.question.list({ directory }, options),
-      activeClient.v2.permission.request.list({ location: { directory } }, options),
-      activeClient.v2.question.request.list({ location: { directory } }, options),
+      server.client.v2.permission.request.list({ location: { directory } }, options),
+      server.client.v2.question.request.list({ location: { directory } }, options),
     ]);
     if (signal.aborted) {
       return;
     }
-    const statusResult = results[0];
-    if (statusResult.status === 'fulfilled') {
-      for (const [providerSessionId, status] of Object.entries(readRecord(statusResult.value.data) ?? {})) {
-        if (directory) sessionDirectories.set(providerSessionId, directory);
-        if (readString(readRecord(status)?.type) !== 'idle') {
-          seen.add(providerSessionId);
-          applySessionActivity(providerSessionId, true);
-        }
-      }
-    } else {
-      // A failed directory query cannot establish that an unseen run is idle.
-      allStatusesRead = false;
-    }
 
-    for (let index = 1; index < results.length; index++) {
-      const result = results[index];
-      if (result.status !== 'fulfilled') {
-        // Older servers do not expose the new v2 lists. Keep listening to
-        // their supported event protocol even when one snapshot API fails.
-        continue;
-      }
-      const protocol = index < 3 ? 'current' : 'v2';
-      const requests = readRequestList(result.value.data);
+    const permissionResult = results[0];
+    if (permissionResult.status === 'fulfilled') {
+      const requests = readRequestList(permissionResult.value.data);
       const requestIds = new Set(requests.map((request) => readString(request.id)));
-      if (index === 1 || index === 3) {
-        for (const [id, entry] of pendingPermissions) {
-          if (entry.protocol === protocol && entry.directory === directory && !requestIds.has(id)) {
-            pendingPermissions.delete(id);
-            broadcastInteractionSettled(entry.appSessionId, entry.sessionId, id, 'permission_cancelled');
-          }
-        }
-        for (const request of requests) registerPendingPermission(request, directory, protocol);
-      } else {
-        for (const [id, entry] of pendingQuestions) {
-          if (entry.protocol === protocol && entry.directory === directory && !requestIds.has(id)) {
-            settlePendingQuestion(id, 'permission_cancelled');
-          }
-        }
-        for (const request of requests) {
-          registerPendingQuestion(readString(request.id) ?? '', readString(request.sessionID) ?? '',
-            normalizeOpenCodeQuestions(request.questions), directory, protocol);
+      for (const [id, entry] of pendingPermissions) {
+        if (entry.serverUrl === server.config.url && entry.directory === directory && !requestIds.has(id)) {
+          pendingPermissions.delete(id);
+          broadcastInteractionSettled(entry.appSessionId, entry.sessionId, id, 'permission_cancelled');
         }
       }
+      for (const request of requests) {
+        registerPendingPermission(request, directory, server.config.url);
+      }
     }
-  }
 
-  for (const entry of [...pendingPermissions.values(), ...pendingQuestions.values()]) {
-    seen.add(entry.sessionId);
-  }
-  // An incomplete snapshot must not turn a disconnected, blocked run idle.
-  for (const providerSessionId of Array.from(busyProviderSessions)) {
-    if (allStatusesRead && !seen.has(providerSessionId)) {
-      applySessionActivity(providerSessionId, false);
+    const questionResult = results[1];
+    if (questionResult.status === 'fulfilled') {
+      const requests = readRequestList(questionResult.value.data);
+      const requestIds = new Set(requests.map((request) => readString(request.id)));
+      for (const [id, entry] of pendingQuestions) {
+        if (entry.serverUrl === server.config.url && entry.directory === directory && !requestIds.has(id)) {
+          settlePendingQuestion(id, 'permission_cancelled');
+        }
+      }
+      for (const request of requests) {
+        registerPendingQuestion(
+          readString(request.id) ?? '',
+          readString(request.sessionID) ?? '',
+          normalizeOpenCodeQuestions(request.questions),
+          server.config.url,
+          directory,
+        );
+      }
     }
   }
 }
 
-async function runEventLoop(activeClient: OpenCodeClient, signal: AbortSignal): Promise<void> {
+async function runEventLoop(server: OpenCodeServer, signal: AbortSignal): Promise<void> {
   let retryDelay = INITIAL_RETRY_DELAY_MS;
   while (!signal.aborted) {
     try {
-      await syncStatusSnapshot(activeClient, signal);
-      // `/event` watches only the server's default project. The global stream
-      // includes the directory needed to find and answer each project's prompt.
-      const { stream } = await activeClient.global.event({ signal, sseMaxRetryAttempts: 1 });
+      await syncStatusSnapshot(server, signal);
+      // The v2 event stream carries every project's events, including the
+      // location needed to find and answer each prompt.
+      const { stream } = await server.client.v2.event.subscribe({ signal, sseMaxRetryAttempts: 1 });
       for await (const event of stream as AsyncGenerator<OpenCodeEventShape>) {
         if (signal.aborted) {
           break;
@@ -814,9 +947,9 @@ async function runEventLoop(activeClient: OpenCodeClient, signal: AbortSignal): 
         retryDelay = INITIAL_RETRY_DELAY_MS;
         if ((event.payload ?? event).type === 'server.connected') {
           // Covers requests raised between the snapshot and stream attachment.
-          await syncStatusSnapshot(activeClient, signal);
+          await syncStatusSnapshot(server, signal);
         }
-        handleOpenCodeEvent(event);
+        handleOpenCodeEvent(event, server);
       }
       throw new Error('OpenCode event stream ended');
     } catch (error) {
@@ -824,7 +957,7 @@ async function runEventLoop(activeClient: OpenCodeClient, signal: AbortSignal): 
         break;
       }
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[OpenCodeBridge] Connection lost, retrying in ${retryDelay}ms:`, message);
+      console.warn(`[OpenCodeBridge] Connection lost for ${server.config.url}, retrying in ${retryDelay}ms:`, message);
       await delay(retryDelay, undefined, { signal }).catch(() => {});
       retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY_MS);
     }
@@ -839,13 +972,15 @@ export function startOpenCodeBridge(): void {
   started = true;
   bridgeAbortController = new AbortController();
 
-  const config = resolveServerConfig();
-  client = createOpencodeClient({
-    baseUrl: config.url,
-    headers: config.headers,
-  });
-  console.log(`[OpenCodeBridge] Watching OpenCode server at ${config.url}`);
-  void runEventLoop(client, bridgeAbortController.signal);
+  const configs = resolveServerConfigs();
+  servers = configs.map((config) => ({
+    config,
+    client: createOpencodeClient({ baseUrl: config.url, headers: config.headers }),
+  }));
+  for (const server of servers) {
+    console.log(`[OpenCodeBridge] Watching OpenCode server at ${server.config.url}`);
+    void runEventLoop(server, bridgeAbortController.signal);
+  }
 }
 
 /** Consumed by the server entrypoint on shutdown. */
@@ -853,7 +988,8 @@ export function stopOpenCodeBridge(): void {
   started = false;
   bridgeAbortController?.abort();
   bridgeAbortController = null;
-  client = null;
+  servers = [];
+  activeProviderSessionsByServer.clear();
   for (const providerSessionId of busyProviderSessions) {
     setExternalSessionActivity(resolveAppSessionId(providerSessionId), PROVIDER, false);
   }
@@ -866,12 +1002,17 @@ export function stopOpenCodeBridge(): void {
   pendingQuestions.clear();
 }
 
+/** Finds the server a pending interaction belongs to, falling back to the first. */
+function findServer(serverUrl: string): OpenCodeServer | null {
+  return servers.find((server) => server.config.url === serverUrl) ?? servers[0] ?? null;
+}
+
 /**
  * Interactive approval gateway for OpenCode sessions.
  *
  * The server entrypoint hands this to the OpenCode runtime so the chat gateway
  * can surface pending approvals (via `chat.subscribe`) and answer them. It is
- * the only component connected to the OpenCode server's event stream, so the
+ * the only component connected to the OpenCode servers' event streams, so the
  * pending state lives here.
  */
 export const openCodePermissionGateway: ProviderRuntimePermissionGateway = {
@@ -913,18 +1054,21 @@ export const openCodePermissionGateway: ProviderRuntimePermissionGateway = {
     }
 
     const entry = pendingPermissions.get(requestId);
-    if (!entry || !client) {
+    if (!entry) {
+      return;
+    }
+    const server = findServer(entry.serverUrl);
+    if (!server) {
       return;
     }
 
     const reply = decision.allow ? (decision.rememberEntry ? 'always' : 'once') : 'reject';
     const options = { throwOnError: true as const };
     resolvingInteractions.add(requestId);
-    const request = entry.protocol === 'v2'
-      ? client.v2.session.permission.reply({ sessionID: entry.sessionId, requestID: requestId, reply, message: decision.message }, options)
-      : entry.protocol === 'legacy'
-        ? client.permission.respond({ sessionID: entry.sessionId, permissionID: requestId, directory: entry.directory, response: reply }, options)
-        : client.permission.reply({ requestID: requestId, directory: entry.directory, reply, message: decision.message }, options);
+    const request = server.client.v2.session.permission.reply(
+      { sessionID: entry.sessionId, requestID: requestId, reply, message: decision.message },
+      options,
+    );
     void request
       .then(() => {
         rememberId(resolvedInteractions, requestId);
@@ -950,20 +1094,23 @@ export const openCodePermissionGateway: ProviderRuntimePermissionGateway = {
  * Answers through the endpoint matching the event, retaining failed submissions.
  */
 function resolveOpenCodeQuestion(entry: OpenCodePendingQuestion, decision: ProviderPermissionDecision): void {
-  if (!client) {
+  const server = findServer(entry.serverUrl);
+  if (!server) {
     return;
   }
 
   resolvingInteractions.add(entry.requestId);
   const options = { throwOnError: true as const };
   const answers = buildQuestionAnswers(entry, decision);
-  const request = entry.protocol === 'v2'
-    ? decision.allow
-      ? client.v2.session.question.reply({ sessionID: entry.sessionId, requestID: entry.requestId, questionV2Reply: { answers } }, options)
-      : client.v2.session.question.reject({ sessionID: entry.sessionId, requestID: entry.requestId }, options)
-    : decision.allow
-      ? client.question.reply({ requestID: entry.requestId, directory: entry.directory, answers }, options)
-      : client.question.reject({ requestID: entry.requestId, directory: entry.directory }, options);
+  const request = decision.allow
+    ? server.client.v2.session.question.reply(
+      { sessionID: entry.sessionId, requestID: entry.requestId, questionV2Reply: { answers } },
+      options,
+    )
+    : server.client.v2.session.question.reject(
+      { sessionID: entry.sessionId, requestID: entry.requestId },
+      options,
+    );
 
   void Promise.resolve(request)
     .then(() => {
