@@ -102,7 +102,6 @@ function SidebarProjectItem({
 }: SidebarProjectItemProps) {
   // Project identity is tracked by the DB-assigned `projectId` everywhere
   // after the projectName → projectId migration.
-  const isSelected = selectedProject?.projectId === project.projectId;
   const taskStatus = getTaskIndicatorStatus(project, mcpServerStatus);
   const mobileRenameInputRef = useRef<HTMLInputElement>(null);
   const [isMobileOptionsOpen, setIsMobileOptionsOpen] = useState(false);
@@ -182,16 +181,12 @@ function SidebarProjectItem({
         }}
         title={isEditing ? undefined : rowTitle}
         className={cn(
-          'mx-2 flex cursor-pointer select-none items-center gap-2 rounded-lg transition-colors',
-          isCompact ? 'px-1 py-2' : 'px-1 py-1.5',
-          isStarred
-            // Pinned keeps its tint in every state, including while selected.
-            ? isSelected
-              ? 'bg-muted/80 ring-1 ring-inset ring-border'
-              : 'bg-muted/70 hover:bg-muted'
-            : isSelected
-              ? 'bg-accent text-accent-foreground'
-              : 'hover:bg-accent/40',
+          'mx-3 flex cursor-pointer select-none items-center gap-2 rounded-lg pl-1 pr-0 transition-colors',
+          isCompact ? 'py-2' : 'py-1.5',
+          // Selection adds no styling of its own — only a pinned project has a
+          // background, so the list reads as one thing instead of three
+          // competing states.
+          isStarred ? 'bg-muted/70 hover:bg-muted' : 'hover:bg-accent/40',
         )}
       >
         <Folder className="h-4 w-4 shrink-0 text-muted-foreground/80" />

@@ -139,11 +139,9 @@ function SidebarSessionItem({
       <a
         href={`/session/${session.id}`}
         className={cn(
-          'flex items-center gap-2 rounded-md text-sm transition-colors',
-          isCompact ? 'py-2 pl-2 pr-2' : 'py-1.5 pl-2 pr-2',
-          isSelected
-            ? 'bg-accent text-accent-foreground'
-            : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground',
+          'relative flex items-center gap-2 rounded-md pl-7 pr-0 text-sm transition-colors',
+          isCompact ? 'py-2' : 'py-1.5',
+          'text-muted-foreground hover:bg-accent/40 hover:text-foreground',
         )}
         title={rowTitle}
         // Left-click keeps in-app navigation; Ctrl/Cmd/middle-click and the
@@ -154,6 +152,15 @@ function SidebarSessionItem({
           selectSession();
         }}
       >
+        {/* The open session's only marker: a bar at its far left. The tinted
+            background it used to get competed with the pinned projects. */}
+        {isSelected && (
+          <span
+            aria-hidden="true"
+            className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary"
+          />
+        )}
+
         <span className="min-w-0 flex-1 truncate">{sessionView.sessionName}</span>
 
         {isCompact ? (
@@ -184,7 +191,7 @@ function SidebarSessionItem({
       {!isCompact && (
         <SessionOptions
           className={cn(
-            'absolute right-2 top-1/2 -translate-y-1/2 transform transition-all duration-200',
+            'absolute right-0 top-1/2 -translate-y-1/2 transform transition-all duration-200',
             // The status dot keeps the row's right edge until the pointer is
             // on it; while renaming, the panel must stay put.
             !isEditing && 'opacity-0 group-hover:opacity-100 focus-within:opacity-100',

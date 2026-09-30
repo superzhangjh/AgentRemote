@@ -156,16 +156,16 @@ export default function SidebarRecentConversations({
                 onClick={handleClick}
                 data-testid="recent-conversation-row"
                 className={cn(
-                  'flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 pr-11 text-left transition-colors',
-                  isSelected
-                    ? 'bg-primary/10 text-foreground'
-                    : 'text-foreground hover:bg-accent/60',
+                  'relative flex min-w-0 items-center gap-2 rounded-lg px-2 py-2 pr-11 text-left text-foreground transition-colors hover:bg-accent/60',
                 )}
               >
-                <span className={cn(
-                  'flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md',
-                  isSelected ? 'bg-primary/10' : 'bg-muted/60',
-                )}>
+                {/* Same marker as the project list: the open row gets a bar,
+                    not a tinted background. */}
+                {isSelected && (
+                  <span aria-hidden="true" className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
+                )}
+
+                <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-muted/60">
                   <LLMProviderLogo provider={conversation.provider} className="h-3.5 w-3.5" />
                 </span>
 

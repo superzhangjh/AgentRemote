@@ -39,7 +39,7 @@ function SessionListSkeleton() {
   return (
     <>
       {Array.from({ length: 3 }).map((_, index) => (
-        <div key={index} className="px-2 py-1.5">
+        <div key={index} className="py-1.5 pl-7 pr-2">
           <div className="h-3 animate-pulse rounded bg-muted" style={{ width: `${60 + index * 15}%` }} />
         </div>
       ))}
@@ -110,12 +110,12 @@ export default function SidebarProjectSessions({
       aria-hidden={!isExpanded}
     >
       <div className="overflow-hidden">
-        <div className="pb-1 pl-7 pr-2">
+        <div className="mx-3 pb-1">
           {showRows && (
             !initialSessionsLoaded ? (
               <SessionListSkeleton />
             ) : !hasSessions ? (
-              <p className="px-2 py-1.5 text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
+              <p className="py-1.5 pl-7 pr-2 text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
             ) : (
               <>
                 {sessions.map((session) => (
@@ -144,7 +144,7 @@ export default function SidebarProjectSessions({
                 {hasMoreSessions && (
                   <button
                     type="button"
-                    className="w-full rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground disabled:opacity-60"
+                    className="w-full rounded-md py-1.5 pl-7 pr-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground disabled:opacity-60"
                     onClick={() => onLoadMoreSessions(project.projectId)}
                     disabled={isLoadingMoreSessions}
                   >
