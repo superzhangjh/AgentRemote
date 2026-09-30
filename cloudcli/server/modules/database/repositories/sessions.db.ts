@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { getConnection } from '@/modules/database/connection.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
@@ -133,9 +135,12 @@ export const sessionsDb = {
       return existing.session_id;
     }
 
-    // Sessions created outside the app (directly via the provider CLI) are
-    // keyed by the provider-native id for both columns. The ON CONFLICT path
-    // covers legacy rows that predate the provider_session_id mapping.
+    // Native ids are only unique within one provider. Give a colliding disk
+    // session its own app id so it cannot replace another agent's transcript.
+    const occupiedId = db.prepare('SELECT provider FROM sessions WHERE session_id = ?')
+      .get(providerSessionId) as { provider: string } | undefined;
+    const appSessionId = occupiedId && occupiedId.provider !== provider ? randomUUID() : providerSessionId;
+    // The ON CONFLICT path covers legacy rows from this same provider.
     db.prepare(
       `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, isArchived, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 0, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
@@ -152,7 +157,7 @@ export const sessionsDb = {
            ELSE COALESCE(excluded.custom_name, sessions.custom_name)
          END`
     ).run(
-      providerSessionId,
+      appSessionId,
       provider,
       providerSessionId,
       customName ?? null,
@@ -163,7 +168,7 @@ export const sessionsDb = {
       updatedAtValue
     );
 
-    return providerSessionId;
+    return appSessionId;
   },
 
   /**
@@ -222,8 +227,8 @@ export const sessionsDb = {
     // id is the provider-native one, which is what this row claims, so replace
     // it rather than leaving two sidebar entries for one conversation.
     db.transaction(() => {
-      db.prepare('DELETE FROM sessions WHERE session_id = ? AND session_id <> ?')
-        .run(input.providerSessionId, input.sessionId);
+      db.prepare('DELETE FROM sessions WHERE session_id = ? AND provider = ? AND session_id <> ?')
+        .run(input.providerSessionId, input.provider, input.sessionId);
       db.prepare(
         `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, model, effort, forked_from_session_id, isArchived, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
@@ -260,10 +265,11 @@ export const sessionsDb = {
         .prepare(
           `SELECT ${SESSION_ROW_COLUMNS} FROM sessions
            WHERE (session_id = ? OR provider_session_id = ?)
+             AND provider = (SELECT provider FROM sessions WHERE session_id = ?)
              AND session_id <> ?
            LIMIT 1`
         )
-        .get(providerSessionId, providerSessionId, sessionId) as SessionRow | undefined;
+        .get(providerSessionId, providerSessionId, sessionId, sessionId) as SessionRow | undefined;
 
       if (duplicate) {
         db.prepare('DELETE FROM sessions WHERE session_id = ?').run(duplicate.session_id);
@@ -448,39 +454,40 @@ export const sessionsDb = {
     ).run(customName, sessionId);
   },
 
-  getSessionById(sessionId: string): SessionRow | null {
+  getSessionById(sessionId: string, provider?: string): SessionRow | null {
     const db = getConnection();
     const row = db
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE session_id = ?
+         WHERE session_id = ? AND (? IS NULL OR provider = ?)
          ORDER BY updated_at DESC
          LIMIT 1`
       )
-      .get(sessionId) as SessionRow | undefined;
+      .get(sessionId, provider ?? null, provider ?? null) as SessionRow | undefined;
 
     return normalizeSessionRow(row) ?? null;
   },
 
   /**
-   * Resolves one session row through the provider-native id.
+   * Resolves one session row through the provider-native id. Pass the provider
+   * when it is known because different agents may use the same native id.
    *
    * The filesystem watcher only knows provider ids (they come from transcript
    * file names), so it uses this lookup to translate disk artifacts back to
    * the app-facing session row before broadcasting sidebar updates.
    */
-  getSessionByProviderSessionId(providerSessionId: string): SessionRow | null {
+  getSessionByProviderSessionId(providerSessionId: string, provider?: string): SessionRow | null {
     const db = getConnection();
     const row = db
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE provider_session_id = ?
+         WHERE provider_session_id = ? AND (? IS NULL OR provider = ?)
          ORDER BY updated_at DESC
          LIMIT 1`
       )
-      .get(providerSessionId) as SessionRow | undefined;
+      .get(providerSessionId, provider ?? null, provider ?? null) as SessionRow | undefined;
 
     return normalizeSessionRow(row) ?? null;
   },

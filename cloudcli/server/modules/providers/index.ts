@@ -12,3 +12,7 @@ export { sessionsService } from './services/sessions.service.js';
 
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
+
+// installOpenCodePermissionGateway: used by the server entrypoint to give the
+// OpenCode runtime the bridge-backed interactive approval gateway.
+export { installOpenCodePermissionGateway } from './list/opencode/opencode-runtime.provider.js';

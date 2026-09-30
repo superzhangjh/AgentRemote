@@ -53,3 +53,22 @@ test('notification payload uses the app session id for a provider session id', a
     assert.match(payload.data.tag, /app-session-1/);
   });
 });
+
+test('notification resolves a shared native id within its own provider', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('codex-app', 'codex', '/workspace/demo');
+    sessionsDb.assignProviderSessionId('codex-app', 'shared-native');
+    sessionsDb.createAppSession('opencode-app', 'opencode', '/workspace/demo');
+    sessionsDb.assignProviderSessionId('opencode-app', 'shared-native');
+
+    const payload = buildNotificationPayload({
+      provider: 'codex',
+      sessionId: 'shared-native',
+      kind: 'stop',
+      code: 'run.stopped',
+      meta: { stopReason: 'completed' },
+    });
+
+    assert.equal(payload.data.sessionId, 'codex-app');
+  });
+});

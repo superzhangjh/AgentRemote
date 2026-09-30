@@ -6,14 +6,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import 'file_relay.dart';
+
 const _serviceLabel = 'dev.agentremote.cloudcli';
+const _openCodeServiceLabel = 'dev.agentremote.opencode';
+const _watchdogServiceLabel = 'dev.agentremote.watchdog';
+
+/// Seconds between watchdog health checks, also written into the LaunchAgent
+/// and shown in the console so the two never drift apart.
+const _watchdogIntervalSeconds = 60;
 
 class DesktopConsoleApp extends StatelessWidget {
   const DesktopConsoleApp({super.key});
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'Agent 遥控台电脑服务',
+        title: 'Agent 控制台',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(useMaterial3: true, brightness: Brightness.dark),
         home: const _DesktopConsolePage(),
@@ -35,6 +43,17 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
   String status = '正在检查服务…';
   bool running = false;
   bool _launchAgentManaged = false;
+  bool openCodeRunning = false;
+  bool openCodeBusy = false;
+  bool _openCodeManaged = false;
+  int? openCodePort;
+  String openCodeStatus = 'OpenCode SDK 服务未启动';
+  RelayProvider relayProvider = RelayProvider.tmpfiles;
+  String relayPath = '';
+  bool relayBusy = false;
+  double relayProgress = 0;
+  String relayStatus = '选择文件后上传，生成手机可打开的临时链接。';
+  RelayUploadResult? relayResult;
   bool busy = false;
   bool pairingBusy = false;
   // Prevents duplicate checks while macOS is handling a local-network prompt.
@@ -43,17 +62,26 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
   Uri? _pairAddress;
   Timer? _pairTimer;
   bool _pollingPair = false;
+  bool watchdogEnabled = false;
+  bool watchdogBusy = false;
+  String watchdogStatus = '守护进程未开启';
 
   String get _home => Platform.environment['HOME'] ?? '';
   String get _plistPath => '$_home/Library/LaunchAgents/$_serviceLabel.plist';
+  String get _openCodePlistPath =>
+      '$_home/Library/LaunchAgents/$_openCodeServiceLabel.plist';
+  String get _watchdogPlistPath =>
+      '$_home/Library/LaunchAgents/$_watchdogServiceLabel.plist';
+  String get _watchdogScriptPath =>
+      '$_home/Library/Application Support/AgentRemote/service-watchdog.sh';
   String get _consoleConfigPath =>
       '$_home/Library/Application Support/AgentRemote/desktop-console.json';
+  // Shared with CloudCLI: the server reads this descriptor and attaches to the
+  // advertised OpenCode server instead of spawning a throwaway one per turn.
+  String get _openCodeDescriptorPath =>
+      '$_home/.agent-remote/opencode-server.json';
   String get _tailscalePath => '/usr/local/bin/tailscale';
   String get _cloudCliPath => _configuredCloudCliPath ?? '';
-  String get _bundledCloudCliPath =>
-      '$_consoleAppPath/Contents/Resources/cloudcli';
-  String get _managedCloudCliPath =>
-      '$_home/Library/Application Support/AgentRemote/cloudcli-runtime';
   late final String _nodePath = [
     '/opt/homebrew/bin/node',
     '/usr/local/bin/node',
@@ -68,6 +96,15 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
     }
   }
 
+  late final String _openCodePath = [
+    '/opt/homebrew/bin/opencode',
+    '/usr/local/bin/opencode',
+    '$_home/.opencode/bin/opencode',
+    '$_home/.bun/bin/opencode',
+    for (final directory in (Platform.environment['PATH'] ?? '').split(':'))
+      if (directory.isNotEmpty) '$directory/opencode',
+  ].firstWhere((path) => File(path).existsSync(), orElse: () => '');
+
   String get _consoleAppPath {
     var directory = File(Platform.resolvedExecutable).parent;
     while (directory.parent.path != directory.path) {
@@ -75,6 +112,194 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
       directory = directory.parent;
     }
     return Platform.resolvedExecutable;
+  }
+
+  /// Programs macOS may require in Full Disk Access before the background agent
+  /// server can read project files. Resolved on demand so "重新检测" picks up an
+  /// agent installed while this window stayed open.
+  List<_DiskAccessTarget> _diskAccessTargets = const [];
+
+  List<_DiskAccessTarget> _resolveDiskAccessTargets() {
+    String? firstExisting(Iterable<String> candidates) {
+      for (final candidate in candidates) {
+        if (candidate.isEmpty) continue;
+        try {
+          if (File(candidate).existsSync() ||
+              Directory(candidate).existsSync()) {
+            return candidate;
+          }
+        } catch (_) {
+          // A path we cannot stat is simply not a match.
+        }
+      }
+      return null;
+    }
+
+    List<String> onPath(String command) => [
+          for (final directory in (Platform.environment['PATH'] ?? '').split(':'))
+            if (directory.isNotEmpty) '$directory/$command',
+        ];
+
+    final targets = <_DiskAccessTarget>[
+      _DiskAccessTarget(label: '控制台', path: _consoleAppPath, isConsole: true),
+      _DiskAccessTarget(label: '后台 Node', path: _nodePermissionPath),
+    ];
+
+    // Each coding agent runs as its own process, so macOS grants Full Disk
+    // Access per executable rather than per provider.
+    final agents = <String, List<String>>{
+      'Claude': [
+        '$_home/.claude/local/claude',
+        '/opt/homebrew/bin/claude',
+        '/usr/local/bin/claude',
+        '$_home/.local/bin/claude',
+        ...onPath('claude'),
+      ],
+      'Codex': [
+        '/opt/homebrew/bin/codex',
+        '/usr/local/bin/codex',
+        '$_home/.local/bin/codex',
+        ...onPath('codex'),
+      ],
+      'OpenCode': [
+        _openCodePath,
+        ...onPath('opencode'),
+      ],
+      'Cursor': [
+        '/opt/homebrew/bin/cursor-agent',
+        '/usr/local/bin/cursor-agent',
+        '$_home/.local/bin/cursor-agent',
+        '$_home/.cursor/bin/cursor-agent',
+        ...onPath('cursor-agent'),
+      ],
+    };
+
+    agents.forEach((label, candidates) {
+      targets.add(
+        _DiskAccessTarget(label: label, path: firstExisting(candidates) ?? ''),
+      );
+    });
+
+    return targets;
+  }
+
+  /// Best-effort check for this console's own Full Disk Access grant: macOS
+  /// only lets an authorized process open the TCC database. There is no public
+  /// API to read another program's grant, so agent rows report install status
+  /// instead and defer to System Settings.
+  bool get _consoleHasFullDiskAccess {
+    try {
+      File('$_home/Library/Application Support/com.apple.TCC/TCC.db')
+          .openSync()
+          .closeSync();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Widget _buildDiskAccessCard() {
+    return _card(
+      title: '完全磁盘访问',
+      icon: Icons.lock_open_outlined,
+      children: [
+        const Text(
+          '后台服务需要读取项目文件。请为下面每个已安装的程序在“系统设置 → '
+          '隐私与安全性 → 完全磁盘访问”中点“+”添加；在文件选择窗口按 '
+          'Command-Shift-G 可粘贴路径。macOS 不提供逐程序的授权状态，'
+          '请以系统设置里的开关为准。',
+        ),
+        const SizedBox(height: 16),
+        for (final target in _diskAccessTargets) _buildDiskAccessRow(target),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: () => unawaited(_openFileAccessSettings()),
+              icon: const Icon(Icons.lock_open_outlined),
+              label: const Text('打开完全磁盘访问设置'),
+            ),
+            TextButton.icon(
+              onPressed: () => setState(
+                () => _diskAccessTargets = _resolveDiskAccessTargets(),
+              ),
+              icon: const Icon(Icons.refresh),
+              label: const Text('重新检测'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDiskAccessRow(_DiskAccessTarget target) {
+    final installed = target.path.isNotEmpty &&
+        (File(target.path).existsSync() || Directory(target.path).existsSync());
+    final authorized = target.isConsole ? _consoleHasFullDiskAccess : installed;
+    final status = target.isConsole
+        ? (authorized ? '已授权' : '未确认')
+        : (installed ? '已安装' : '未找到');
+    final statusColor = authorized ? Colors.greenAccent : Colors.orangeAccent;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+      decoration: BoxDecoration(
+        color: Colors.white10,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  target.label,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: statusColor.withAlpha(40),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  status,
+                  style: TextStyle(fontSize: 12, color: statusColor),
+                ),
+              ),
+            ],
+          ),
+          if (target.path.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            SelectableText(
+              target.path,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+          Wrap(
+            spacing: 8,
+            children: [
+              if (target.path.isNotEmpty)
+                TextButton.icon(
+                  onPressed: () => unawaited(_revealInFinder(target.path)),
+                  icon: const Icon(Icons.folder_open_outlined, size: 16),
+                  label: const Text('定位'),
+                ),
+              TextButton.icon(
+                onPressed: () => unawaited(_openFileAccessSettings()),
+                icon: const Icon(Icons.settings_outlined, size: 16),
+                label: const Text('授权'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _openFileAccessSettings() async {
@@ -136,25 +361,24 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
               ),
               const SizedBox(height: 12),
               const Text(
-                '文件：在完整磁盘访问中点“+”添加控制台和下方 Node 程序。若应用列表里找不到，请在文件选择窗口按 Command-Shift-G 并粘贴显示的路径。',
+                '文件：在完整磁盘访问中点“+”添加下面列出的每个程序；未使用的 Agent 可以跳过。若应用列表里找不到，请在文件选择窗口按 Command-Shift-G 并粘贴显示的路径。',
               ),
               const SizedBox(height: 8),
-              Text('控制台：\n$_consoleAppPath'),
-              TextButton.icon(
-                onPressed: () => unawaited(_revealInFinder(_consoleAppPath)),
-                icon: const Icon(Icons.folder_open_outlined),
-                label: const Text('在 Finder 中定位控制台应用'),
-              ),
-              Text('后台 Node：\n$_nodePermissionPath'),
-              TextButton.icon(
-                onPressed: () =>
-                    unawaited(_revealInFinder(_nodePermissionPath)),
-                icon: const Icon(Icons.folder_open_outlined),
-                label: const Text('在 Finder 中定位 Node'),
-              ),
+              for (final target in _diskAccessTargets) ...[
+                Text(
+                  '${target.label}：\n'
+                  '${target.path.isEmpty ? '未找到' : target.path}',
+                ),
+                if (target.path.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: () => unawaited(_revealInFinder(target.path)),
+                    icon: const Icon(Icons.folder_open_outlined),
+                    label: Text('在 Finder 中定位${target.label}'),
+                  ),
+              ],
               const SizedBox(height: 12),
               const Text(
-                '本地网络列表只会显示已经发起局域网请求的应用。点“检查并准备远程权限”触发请求并允许弹窗；若探测成功但列表没有控制台，无需再添加。防火墙若拦截，请在系统设置 → 网络 → 防火墙中添加 Node。离开 Mac 前用手机连接一次，以触发可能的入站提示。',
+                '本地网络列表只会显示已经发起局域网请求的应用。点“检查并准备远程权限”触发请求并允许弹窗；若探测成功但列表没有控制台，无需再添加。防火墙若拦截，请在系统设置 → 网络 → 防火墙中添加 Node（以及 OpenCode）。离开 Mac 前用手机连接一次，以触发可能的入站提示。',
               ),
               const SizedBox(height: 8),
               const Text('完成授权后，停止并重新启动后台服务。其他 Agent 自身弹出的权限仍需分别授权。'),
@@ -234,12 +458,7 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
 
   bool _isCloudCliDirectory(Directory directory) =>
       File('${directory.path}/package.json').existsSync() &&
-      (File(_cloudCliEntry(directory.path)).existsSync() ||
-          File('${directory.path}/server/modules/cli/cli.service.ts')
-              .existsSync());
-
-  bool _hasBuiltCloudCli(String path) =>
-      File(_cloudCliEntry(path)).existsSync();
+      File('${directory.path}/server/modules/cli/cli.service.ts').existsSync();
 
   Future<bool> _hasLiveCloudCliServer() async {
     try {
@@ -266,47 +485,7 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
     }
   }
 
-  String? _findInstalledCloudCliPath() {
-    final candidates = <String>{
-      '/opt/homebrew/bin/cloudcli',
-      '/usr/local/bin/cloudcli',
-      for (final directory in (Platform.environment['PATH'] ?? '').split(':'))
-        if (directory.isNotEmpty) '$directory/cloudcli',
-      '/opt/homebrew/lib/node_modules/@cloudcli-ai/cloudcli',
-      '/usr/local/lib/node_modules/@cloudcli-ai/cloudcli',
-      '$_home/.npm-global/lib/node_modules/@cloudcli-ai/cloudcli',
-    };
-    for (final candidate in candidates) {
-      try {
-        final file = File(candidate);
-        if (file.existsSync()) {
-          var directory = Directory(file.resolveSymbolicLinksSync()).parent;
-          while (true) {
-            if (_hasBuiltCloudCli(directory.path) &&
-                File('${directory.path}/package.json').existsSync()) {
-              return directory.path;
-            }
-            if (directory.parent.path == directory.path) break;
-            directory = directory.parent;
-          }
-        }
-        final directory = Directory(candidate);
-        if (_isCloudCliDirectory(directory) &&
-            _hasBuiltCloudCli(directory.path)) {
-          return directory.path;
-        }
-      } catch (_) {
-        // A stale PATH entry or broken symlink is not a usable installation.
-      }
-    }
-    return null;
-  }
-
   String _findCloudCliPath() {
-    if (_isCloudCliDirectory(Directory(_bundledCloudCliPath))) {
-      return _bundledCloudCliPath;
-    }
-    String? sourcePath;
     for (final start in [
       Platform.environment['AGENT_REMOTE_PROJECT_ROOT'],
       Directory.current.path,
@@ -316,19 +495,17 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
       var directory = Directory(start);
       while (true) {
         if (_isCloudCliDirectory(directory)) {
-          if (_hasBuiltCloudCli(directory.path)) return directory.path;
-          sourcePath ??= directory.path;
+          return directory.path;
         }
         final candidate = Directory('${directory.path}/cloudcli');
         if (_isCloudCliDirectory(candidate)) {
-          if (_hasBuiltCloudCli(candidate.path)) return candidate.path;
-          sourcePath ??= candidate.path;
+          return candidate.path;
         }
         if (directory.parent.path == directory.path) break;
         directory = directory.parent;
       }
     }
-    return sourcePath ?? _findInstalledCloudCliPath() ?? '';
+    return '';
   }
 
   String get _npmPath => [
@@ -339,47 +516,10 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
           if (directory.isNotEmpty) '$directory/npm',
       ].firstWhere((path) => File(path).existsSync(), orElse: () => '');
 
-  Future<String> _prepareBundledCloudCli() async {
-    final runtime = Directory(_managedCloudCliPath);
-    await runtime.parent.create(recursive: true);
-    final copy = await Process.run('/usr/bin/ditto', [
-      _bundledCloudCliPath,
-      runtime.path,
-    ]);
-    if (copy.exitCode != 0) {
-      throw StateError('无法复制内置 CloudCLI：${copy.stderr}');
-    }
-
-    final lock = File('${runtime.path}/package-lock.json');
-    final installedLock =
-        File('${runtime.path}/.agentremote-installed-lock.json');
-    if (!Directory('${runtime.path}/node_modules').existsSync() ||
-        !installedLock.existsSync() ||
-        await installedLock.readAsString() != await lock.readAsString()) {
-      if (_npmPath.isEmpty) {
-        throw StateError('未找到 npm。请先安装 Node.js 22 或 24，再启动后台服务。');
-      }
-      if (mounted) setState(() => status = '正在安装 CloudCLI 运行依赖，首次启动需要联网…');
-      final install = await Process.run(
-        _npmPath,
-        ['ci', '--omit=dev', '--no-audit', '--no-fund'],
-        workingDirectory: runtime.path,
-        environment: {
-          'PATH':
-              '${File(_nodePath).parent.path}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${Platform.environment['PATH'] ?? ''}',
-        },
-      );
-      if (install.exitCode != 0) {
-        throw StateError('CloudCLI 运行依赖安装失败：${install.stderr}');
-      }
-      await installedLock.writeAsString(await lock.readAsString());
-    }
-    return runtime.path;
-  }
-
   @override
   void initState() {
     super.initState();
+    _diskAccessTargets = _resolveDiskAccessTargets();
     unawaited(_initialize());
   }
 
@@ -512,7 +652,21 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
       ..sort((a, b) => _addressRank(a).compareTo(_addressRank(b)));
     final serviceRunning = await _isLoaded();
     final existingServer = !serviceRunning && await _hasLiveCloudCliServer();
+    final openCodeLoaded = await _isOpenCodeLoaded();
+    final watchdogLoaded = await _isWatchdogLoaded();
+    final openCodeDescriptorPort = await _readOpenCodePort();
+    final openCodeHealthy = openCodeDescriptorPort != null &&
+        await _probeOpenCodeServer(openCodeDescriptorPort);
     if (!mounted) return;
+    if (watchdogLoaded) {
+      // Keep the on-disk script in step with this build; launchd reruns the
+      // file each interval, so a plain rewrite is enough. Failures are benign.
+      try {
+        final script = File(_watchdogScriptPath);
+        await script.parent.create(recursive: true);
+        await script.writeAsString(_watchdogScript);
+      } catch (_) {}
+    }
     savedCloudCliPath ??= _findCloudCliPath();
     setState(() {
       _configuredCloudCliPath = savedCloudCliPath;
@@ -520,6 +674,17 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
       selectedAddress = ips.isEmpty ? null : ips.first;
       running = serviceRunning || existingServer;
       _launchAgentManaged = serviceRunning;
+      openCodeRunning = openCodeHealthy;
+      _openCodeManaged = openCodeLoaded;
+      openCodePort = openCodeHealthy ? openCodeDescriptorPort : null;
+      openCodeStatus = openCodeHealthy
+          ? 'OpenCode SDK 服务正在运行，CloudCLI 会自动复用该服务'
+          : 'OpenCode SDK 服务未启动';
+      watchdogEnabled = watchdogLoaded;
+      watchdogStatus = watchdogLoaded
+          ? '守护进程正在运行：每 $_watchdogIntervalSeconds 秒检查一次 '
+              'CloudCLI 与 OpenCode 服务，未运行会自动重新启动'
+          : '守护进程未开启';
       status = serviceRunning
           ? 'CloudCLI 后台服务正在运行'
           : existingServer
@@ -595,6 +760,418 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&apos;');
 
+  Future<bool> _isOpenCodeLoaded() async {
+    try {
+      final domain = await _userDomain();
+      final result = await Process.run('/bin/launchctl', [
+        'print',
+        '$domain/$_openCodeServiceLabel',
+      ]);
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _isWatchdogLoaded() async {
+    try {
+      final domain = await _userDomain();
+      final result = await Process.run('/bin/launchctl', [
+        'print',
+        '$domain/$_watchdogServiceLabel',
+      ]);
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Shell script the watchdog LaunchAgent runs on every interval. It probes
+  /// both managed services and restarts the ones whose LaunchAgent is loaded
+  /// but no longer answers, so a crashed or hung server recovers on its own.
+  String get _watchdogScript => r'''#!/bin/sh
+# 由 Agent 控制台生成，请通过控制台的守护进程开关管理；手动修改会被覆盖。
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+DOMAIN="gui/$(id -u)"
+CLOUDCLI_LABEL="dev.agentremote.cloudcli"
+OPENCODE_LABEL="dev.agentremote.opencode"
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+LOG_DIR="$HOME/Library/Logs/AgentRemote"
+LOG_FILE="$LOG_DIR/watchdog.log"
+
+mkdir -p "$LOG_DIR" 2>/dev/null
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG_FILE" 2>/dev/null; }
+
+healthy() {
+  /usr/bin/curl -fsS --max-time 5 "$1" -o /dev/null 2>/dev/null
+}
+
+restart() {
+  label="$1"
+  plist="$LAUNCH_AGENTS/$label.plist"
+  if /bin/launchctl kickstart -k "$DOMAIN/$label" >/dev/null 2>&1; then
+    log "已重新启动 $label"
+  elif [ -f "$plist" ] && /bin/launchctl bootstrap "$DOMAIN" "$plist" >/dev/null 2>&1; then
+    log "已重新加载并启动 $label"
+  else
+    log "无法重新启动 $label"
+  fi
+}
+
+# CloudCLI 后台服务：优先使用服务自己写入的可连接地址，兼容 Tailscale Serve。
+if [ -f "$LAUNCH_AGENTS/$CLOUDCLI_LABEL.plist" ]; then
+  url="http://127.0.0.1:3001"
+  marker="$HOME/.cloudcli/local-server.json"
+  if [ -f "$marker" ]; then
+    parsed=$(/usr/bin/sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$marker" | /usr/bin/head -n 1)
+    [ -n "$parsed" ] && url="$parsed"
+  fi
+  if ! healthy "$url/health"; then
+    log "CloudCLI 健康检查失败（$url/health），尝试重新启动"
+    restart "$CLOUDCLI_LABEL"
+  fi
+fi
+
+# OpenCode SDK 服务：端口由控制台写入的共享描述文件提供。
+if [ -f "$LAUNCH_AGENTS/$OPENCODE_LABEL.plist" ]; then
+  port=""
+  descriptor="$HOME/.agent-remote/opencode-server.json"
+  if [ -f "$descriptor" ]; then
+    port=$(/usr/bin/sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$descriptor" | /usr/bin/head -n 1)
+  fi
+  if [ -z "$port" ] || ! healthy "http://127.0.0.1:$port/config"; then
+    log "OpenCode 健康检查失败（端口 ${port:-未知}），尝试重新启动"
+    restart "$OPENCODE_LABEL"
+  fi
+fi
+''';
+
+  Future<int?> _readOpenCodePort() async {
+    try {
+      final descriptor =
+          jsonDecode(await File(_openCodeDescriptorPath).readAsString())
+              as Map<String, dynamic>;
+      final port = descriptor['port'];
+      return port is int && port > 0 ? port : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeOpenCodeDescriptor(int port) async {
+    final file = File(_openCodeDescriptorPath);
+    await file.parent.create(recursive: true);
+    await file.writeAsString(jsonEncode({
+      'url': 'http://127.0.0.1:$port',
+      'host': '0.0.0.0',
+      'port': port,
+      'updatedAt': DateTime.now().toUtc().toIso8601String(),
+    }));
+  }
+
+  Future<void> _deleteOpenCodeDescriptor() async {
+    final file = File(_openCodeDescriptorPath);
+    if (await file.exists()) await file.delete();
+  }
+
+  Future<bool> _probeOpenCodeServer(int port) async {
+    final client = _directHttpClient(const Duration(seconds: 2));
+    try {
+      final request = await client.getUrl(
+        Uri.parse('http://127.0.0.1:$port/config'),
+      );
+      final response = await request.close();
+      await response.drain<void>();
+      return response.statusCode == HttpStatus.ok;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Reserves a free loopback port and releases it again so the OpenCode
+  /// LaunchAgent can bind it on any interface without a hardcoded port.
+  Future<int> _findFreePort() async {
+    final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final port = socket.port;
+    await socket.close();
+    return port;
+  }
+
+  Future<void> _startOpenCode() async {
+    if (openCodeBusy || openCodeRunning) return;
+    setState(() {
+      openCodeBusy = true;
+      openCodeStatus = '正在启动 OpenCode SDK 服务…';
+    });
+    try {
+      final openCodePath = _openCodePath;
+      if (openCodePath.isEmpty) {
+        throw StateError(
+          '未找到 opencode 命令。请先安装 OpenCode CLI（https://opencode.ai/docs/）。',
+        );
+      }
+      final domain = await _userDomain();
+      // A loaded agent may be crash-looping on a port that something else took
+      // over since it started; drop it so this start can pick a fresh free port.
+      if (await _isOpenCodeLoaded()) {
+        await Process.run('/bin/launchctl', [
+          'bootout',
+          '$domain/$_openCodeServiceLabel',
+        ]);
+      }
+      final port = await _findFreePort();
+      final launchAgents = Directory('$_home/Library/LaunchAgents');
+      final logs = Directory('$_home/Library/Logs/AgentRemote');
+      await launchAgents.create(recursive: true);
+      await logs.create(recursive: true);
+      final path =
+          '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${Platform.environment['PATH'] ?? ''}';
+      final plist = '''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$_openCodeServiceLabel</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/caffeinate</string><string>-i</string>
+    <string>${_xml(openCodePath)}</string><string>serve</string>
+    <string>--hostname</string><string>0.0.0.0</string>
+    <string>--port</string><string>$port</string>
+  </array>
+  <key>WorkingDirectory</key><string>${_xml(_home)}</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>${_xml(path)}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${_xml('${logs.path}/opencode.log')}</string>
+  <key>StandardErrorPath</key><string>${_xml('${logs.path}/opencode-error.log')}</string>
+</dict></plist>
+''';
+      await File(_openCodePlistPath).writeAsString(plist);
+      var bootstrapSucceeded = false;
+      var bootstrapError = '';
+      for (var attempt = 0; attempt < 5; attempt++) {
+        final result = await Process.run('/bin/launchctl', [
+          'bootstrap',
+          domain,
+          _openCodePlistPath,
+        ]);
+        bootstrapSucceeded = result.exitCode == 0 || await _isOpenCodeLoaded();
+        if (bootstrapSucceeded) break;
+        bootstrapError = '${result.stderr}';
+        // launchd can briefly refuse a label right after bootout releases it.
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
+      if (!bootstrapSucceeded) {
+        throw StateError(bootstrapError);
+      }
+      var ready = false;
+      for (var attempt = 0; attempt < 40; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        if (await _probeOpenCodeServer(port)) {
+          ready = true;
+          break;
+        }
+      }
+      if (!ready) {
+        throw StateError(
+          '服务未能在 20 秒内启动。请查看 ~/Library/Logs/AgentRemote/opencode-error.log',
+        );
+      }
+      await _writeOpenCodeDescriptor(port);
+      if (mounted) {
+        setState(() {
+          openCodeRunning = true;
+          _openCodeManaged = true;
+          openCodePort = port;
+          openCodeStatus = 'OpenCode SDK 服务正在运行，CloudCLI 会自动复用该服务';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => openCodeStatus = '启动失败：$error');
+    } finally {
+      if (mounted) setState(() => openCodeBusy = false);
+    }
+  }
+
+  Future<void> _stopOpenCode() async {
+    if (openCodeBusy || !openCodeRunning) return;
+    if (!_openCodeManaged) {
+      setState(() => openCodeStatus = 'OpenCode 由其他方式启动，请在原终端或服务管理器中停止。');
+      return;
+    }
+    setState(() => openCodeBusy = true);
+    try {
+      final domain = await _userDomain();
+      final result = await Process.run('/bin/launchctl', [
+        'bootout',
+        '$domain/$_openCodeServiceLabel',
+      ]);
+      if (result.exitCode != 0) throw StateError('${result.stderr}');
+      final plist = File(_openCodePlistPath);
+      if (await plist.exists()) await plist.delete();
+      // Removing the descriptor stops CloudCLI from attaching to a dead server.
+      await _deleteOpenCodeDescriptor();
+      if (mounted) {
+        setState(() {
+          openCodeRunning = false;
+          _openCodeManaged = false;
+          openCodePort = null;
+          openCodeStatus = 'OpenCode SDK 服务已停止';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => openCodeStatus = '停止失败：$error');
+    } finally {
+      if (mounted) setState(() => openCodeBusy = false);
+    }
+  }
+
+  Future<void> _startWatchdog() async {
+    if (watchdogBusy || watchdogEnabled) return;
+    setState(() {
+      watchdogBusy = true;
+      watchdogStatus = '正在开启守护进程…';
+    });
+    try {
+      final launchAgents = Directory('$_home/Library/LaunchAgents');
+      final logs = Directory('$_home/Library/Logs/AgentRemote');
+      await launchAgents.create(recursive: true);
+      await logs.create(recursive: true);
+      final script = File(_watchdogScriptPath);
+      await script.parent.create(recursive: true);
+      await script.writeAsString(_watchdogScript);
+      final plist = '''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$_watchdogServiceLabel</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/sh</string>
+    <string>${_xml(script.path)}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>$_watchdogIntervalSeconds</integer>
+  <key>StandardOutPath</key><string>${_xml('${logs.path}/watchdog-out.log')}</string>
+  <key>StandardErrorPath</key><string>${_xml('${logs.path}/watchdog-error.log')}</string>
+</dict></plist>
+''';
+      await File(_watchdogPlistPath).writeAsString(plist);
+      final domain = await _userDomain();
+      var bootstrapSucceeded = false;
+      var bootstrapError = '';
+      for (var attempt = 0; attempt < 5; attempt++) {
+        final result = await Process.run('/bin/launchctl', [
+          'bootstrap',
+          domain,
+          _watchdogPlistPath,
+        ]);
+        bootstrapSucceeded = result.exitCode == 0 || await _isWatchdogLoaded();
+        if (bootstrapSucceeded) break;
+        bootstrapError = '${result.stderr}';
+        // launchd can briefly refuse a label right after bootout releases it.
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
+      if (!bootstrapSucceeded) throw StateError(bootstrapError);
+      if (mounted) {
+        setState(() {
+          watchdogEnabled = true;
+          watchdogStatus = '守护进程正在运行：每 $_watchdogIntervalSeconds 秒检查一次 '
+              'CloudCLI 与 OpenCode 服务，未运行会自动重新启动';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => watchdogStatus = '开启失败：$error');
+    } finally {
+      if (mounted) setState(() => watchdogBusy = false);
+    }
+  }
+
+  Future<void> _stopWatchdog() async {
+    if (watchdogBusy || !watchdogEnabled) return;
+    setState(() => watchdogBusy = true);
+    try {
+      final domain = await _userDomain();
+      final result = await Process.run('/bin/launchctl', [
+        'bootout',
+        '$domain/$_watchdogServiceLabel',
+      ]);
+      if (result.exitCode != 0) throw StateError('${result.stderr}');
+      final plist = File(_watchdogPlistPath);
+      if (await plist.exists()) await plist.delete();
+      if (mounted) {
+        setState(() {
+          watchdogEnabled = false;
+          watchdogStatus = '守护进程已关闭';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => watchdogStatus = '关闭失败：$error');
+    } finally {
+      if (mounted) setState(() => watchdogBusy = false);
+    }
+  }
+
+  Future<void> _chooseRelayFile() async {
+    if (relayBusy) return;
+    try {
+      final selected = await _consoleChannel.invokeMethod<String>(
+        'chooseRelayFile',
+        {'initialPath': _home},
+      );
+      if (selected != null && selected.isNotEmpty && mounted) {
+        setState(() {
+          relayPath = selected;
+          relayResult = null;
+          relayStatus = '已选择文件，点击“上传并生成链接”。';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => relayStatus = '无法选择文件：$error');
+    }
+  }
+
+  Future<void> _uploadRelay() async {
+    if (relayBusy || relayPath.isEmpty) return;
+    final file = File(relayPath);
+    if (!await file.exists()) {
+      if (mounted) setState(() => relayStatus = '文件不存在：$relayPath');
+      return;
+    }
+    setState(() {
+      relayBusy = true;
+      relayProgress = 0;
+      relayResult = null;
+      relayStatus = '正在上传到 ${relayProvider.label}…';
+    });
+    try {
+      final result = await FileRelay.upload(
+        file,
+        relayProvider,
+        onProgress: (progress) {
+          if (mounted) setState(() => relayProgress = progress);
+        },
+      );
+      if (mounted) {
+        setState(() {
+          relayResult = result;
+          relayStatus = '上传完成。链接有效期由服务商决定，过期后请重新上传。';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => relayStatus = '$error');
+    } finally {
+      if (mounted) setState(() => relayBusy = false);
+    }
+  }
+
+  Future<void> _copyRelayLink() async {
+    final url = relayResult?.url;
+    if (url == null) return;
+    await Clipboard.setData(ClipboardData(text: url));
+    if (mounted) setState(() => relayStatus = '链接已复制。');
+  }
+
   Future<void> _start() async {
     if (busy || running) return;
     setState(() {
@@ -624,57 +1201,65 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
         return;
       }
       if (_cloudCliPath.isEmpty) {
-        throw StateError(
-          '未找到 CloudCLI。请重新安装控制台应用，或选择本地 CloudCLI 项目目录。',
-        );
+        throw StateError('未找到 CloudCLI 源码目录，请选择本地 CloudCLI 项目目录。');
       }
       if (!File(_nodePath).existsSync()) {
         throw StateError('未找到 Node.js。请先安装 Node.js 22 或 24，再启动后台服务。');
       }
-      final servicePath = _cloudCliPath == _bundledCloudCliPath
-          ? await _prepareBundledCloudCli()
-          : _cloudCliPath;
-      final cli = File(_cloudCliEntry(servicePath));
-      if (!cli.existsSync()) {
-        if (!File('$servicePath/server/modules/cli/cli.service.ts')
-            .existsSync()) {
-          throw StateError(
-            '找到的 CloudCLI 安装缺少服务器文件。请重新安装 CloudCLI，或选择 CloudCLI 项目目录。',
+      final servicePath = _cloudCliPath;
+      if (!_isCloudCliDirectory(Directory(servicePath))) {
+        throw StateError('所选目录不是 CloudCLI 源码目录，请重新选择 CloudCLI 项目目录。');
+      }
+      final npmPath = _npmPath;
+      if (npmPath.isEmpty) {
+        throw StateError('未找到 npm。请先安装 Node.js 22 或 24，再启动后台服务。');
+      }
+      final lockFile = File('$servicePath/package-lock.json');
+      if (!lockFile.existsSync()) {
+        throw StateError('所选 CloudCLI 目录缺少 package-lock.json，无法自动安装依赖。');
+      }
+      final nodeModules = Directory('$servicePath/node_modules');
+      final hasInstalledDependencies = nodeModules.existsSync() &&
+          File('${nodeModules.path}/.package-lock.json').existsSync() &&
+          ['vite', 'tsc', 'tsc-alias'].every(
+            (tool) => File('${nodeModules.path}/.bin/$tool').existsSync(),
           );
-        }
-        if (!Directory('$servicePath/node_modules').existsSync()) {
-          throw StateError(
-            'CloudCLI 依赖尚未安装。请在“CloudCLI 项目目录”运行：\n'
-            'cd "$servicePath" && npm ci && npm run build',
-          );
-        }
-        final npmPath = _npmPath;
-        if (npmPath.isEmpty) {
-          throw StateError(
-            '检测到 CloudCLI 源码，但找不到 npm。请先安装 Node.js 22 或 24，再运行：\n'
-            'cd "$servicePath" && npm ci && npm run build',
-          );
-        }
-        if (mounted) {
-          setState(() => status = '正在首次构建 CloudCLI…');
-        }
-        final build = await Process.run(
+      if (!hasInstalledDependencies) {
+        if (mounted) setState(() => status = '正在安装 CloudCLI 依赖…');
+        final install = await Process.run(
           npmPath,
-          ['run', 'build'],
+          ['ci', '--no-audit', '--no-fund'],
           workingDirectory: servicePath,
           environment: {
             'PATH':
                 '${File(_nodePath).parent.path}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${Platform.environment['PATH'] ?? ''}',
           },
         );
-        if (build.exitCode != 0 || !cli.existsSync()) {
-          final details = '${build.stderr}\n${build.stdout}'.trim();
+        if (install.exitCode != 0) {
+          final details = '${install.stderr}\n${install.stdout}'.trim();
           throw StateError(
-            'CloudCLI 构建失败。请在“CloudCLI 项目目录”运行：\n'
-            'cd "$servicePath" && npm ci && npm run build'
+            'CloudCLI 依赖安装失败。请检查网络和 package-lock.json。'
             '${details.isEmpty ? '' : '\n\n$details'}',
           );
         }
+      }
+      if (mounted) setState(() => status = '正在构建 CloudCLI…');
+      final build = await Process.run(
+        npmPath,
+        ['run', 'build'],
+        workingDirectory: servicePath,
+        environment: {
+          'PATH':
+              '${File(_nodePath).parent.path}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${Platform.environment['PATH'] ?? ''}',
+        },
+      );
+      final cli = File(_cloudCliEntry(servicePath));
+      if (build.exitCode != 0 || !cli.existsSync()) {
+        final details = '${build.stderr}\n${build.stdout}'.trim();
+        throw StateError(
+          'CloudCLI 构建失败。'
+          '${details.isEmpty ? '' : '\n\n$details'}',
+        );
       }
       final launchAgents = Directory('$_home/Library/LaunchAgents');
       final logs = Directory('$_home/Library/Logs/AgentRemote');
@@ -793,144 +1378,394 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
 
   @override
   Widget build(BuildContext context) {
-    final url = selectedAddress == null ? null : 'http://$selectedAddress:3001';
-    return Scaffold(
-      appBar: AppBar(title: const Text('Agent 遥控台电脑服务')),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
-          child: ListView(
-            padding: const EdgeInsets.all(24),
-            children: [
-              const Text('选择手机可以访问的地址', style: TextStyle(fontSize: 20)),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: selectedAddress,
-                items: [
-                  for (final ip in addresses)
-                    DropdownMenuItem(value: ip, child: Text(ip)),
-                ],
-                onChanged: (value) {
-                  unawaited(_closePairing());
-                  setState(() => selectedAddress = value);
-                },
-                decoration: const InputDecoration(
-                  labelText: '局域网或 Tailscale IPv4 地址',
-                ),
-              ),
-              const SizedBox(height: 16),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.folder_outlined),
-                title: const Text('CloudCLI 项目目录'),
-                subtitle: Text(
-                  _cloudCliPath.isEmpty ? '尚未选择' : _cloudCliPath,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: TextButton(
-                  onPressed: busy ? null : _chooseCloudCliDirectory,
-                  child: const Text('选择'),
-                ),
-              ),
-              if (_isCloudCliDirectory(Directory(_bundledCloudCliPath)) &&
-                  _cloudCliPath != _bundledCloudCliPath)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
-                    onPressed: busy
-                        ? null
-                        : () => unawaited(
-                              _saveCloudCliPath(_bundledCloudCliPath),
-                            ),
-                    child: const Text('改用应用内置 CloudCLI'),
-                  ),
-                ),
-              const SizedBox(height: 8),
-              SelectableText(status),
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: busy || running ? null : _start,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('启动后台服务'),
-              ),
-              if (running && _launchAgentManaged) ...[
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: busy ? null : _stop,
-                  icon: const Icon(Icons.stop),
-                  label: const Text('停止并取消开机启动'),
-                ),
-              ] else if (running) ...[
-                const SizedBox(height: 8),
-                const Text('CloudCLI 由终端或其他服务管理器启动，请在那里停止。'),
-              ],
-              const SizedBox(height: 16),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        '远程使用权限',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        '离开 Mac 前检查文件和网络权限，完成后用手机连接一次。'
-                        'macOS 的授权弹窗必须在电脑上确认。',
-                      ),
-                      const SizedBox(height: 8),
-                      FilledButton.icon(
-                        onPressed: permissionBusy || selectedAddress == null
-                            ? null
-                            : _prepareRemoteAccess,
-                        icon: const Icon(Icons.verified_user_outlined),
-                        label: Text(permissionBusy ? '正在检查…' : '检查并准备远程权限'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              if (running && url != null) ...[
-                const SizedBox(height: 24),
-                OutlinedButton.icon(
-                  onPressed: pairingBusy
-                      ? null
-                      : _pairToken == null
-                          ? _startPairing
-                          : _closePairing,
-                  icon: Icon(_pairToken == null ? Icons.qr_code : Icons.close),
-                  label: Text(_pairToken == null ? '显示一次性二维码' : '关闭二维码'),
-                ),
-                if (_pairToken != null) ...[
-                  const SizedBox(height: 16),
-                  Center(
-                    child: QrImageView(
-                      data: '$url?pair=$_pairToken',
-                      size: 300,
-                      backgroundColor: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    '手机成功打开服务后，二维码会自动关闭；5 分钟后自动失效。',
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-                const SizedBox(height: 12),
-                SelectableText(url, textAlign: TextAlign.center),
-                const SizedBox(height: 12),
-                const Text(
-                  '安卓基座扫码后可切换已保存的本地和 Tailscale 地址。服务随登录启动，允许 Mac 熄屏；合盖休眠仍会断开。',
-                  textAlign: TextAlign.center,
-                ),
-              ],
+    return DefaultTabController(
+      length: 4,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Agent 控制台'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(icon: Icon(Icons.dns_outlined), text: '服务'),
+              Tab(icon: Icon(Icons.qr_code_2_outlined), text: '连接'),
+              Tab(icon: Icon(Icons.folder_open_outlined), text: '文件'),
+              Tab(icon: Icon(Icons.verified_user_outlined), text: '权限'),
             ],
           ),
+        ),
+        body: TabBarView(
+          children: [
+            _buildServicesTab(),
+            _buildConnectionTab(),
+            _buildFilesTab(),
+            _buildPermissionsTab(),
+          ],
         ),
       ),
     );
   }
+
+  /// Shared scroll frame for one tab: centered with a comfortable reading
+  /// width so the console still looks like a settings window when the desktop
+  /// window is very wide.
+  Widget _tabScroll(List<Widget> children) => Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: ListView(
+            padding: const EdgeInsets.all(24),
+            children: children,
+          ),
+        ),
+      );
+
+  /// Section card shared by every tab so the console reads as one UI.
+  Widget _card({
+    required String title,
+    IconData? icon,
+    required List<Widget> children,
+  }) =>
+      Card(
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  if (icon != null) ...[
+                    Icon(
+                      icon,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              ...children,
+            ],
+          ),
+        ),
+      );
+
+  Widget _buildServicesTab() {
+    return _tabScroll([
+      _card(
+        title: 'CloudCLI 后台服务',
+        icon: Icons.dns_outlined,
+        children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.folder_outlined),
+            title: const Text('CloudCLI 项目目录'),
+            subtitle: Text(
+              _cloudCliPath.isEmpty ? '尚未选择' : _cloudCliPath,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: TextButton(
+              onPressed: busy ? null : _chooseCloudCliDirectory,
+              child: const Text('选择'),
+            ),
+          ),
+          const Text(
+            '缺少依赖时会自动运行 npm ci，然后运行 npm run build；更新依赖后请重新运行 npm ci。',
+          ),
+          const SizedBox(height: 12),
+          SelectableText(status),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: busy || running ? null : _start,
+            icon: const Icon(Icons.play_arrow),
+            label: const Text('启动后台服务'),
+          ),
+          if (running && _launchAgentManaged) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: busy ? null : _stop,
+              icon: const Icon(Icons.stop),
+              label: const Text('停止并取消开机启动'),
+            ),
+          ] else if (running) ...[
+            const SizedBox(height: 8),
+            const Text('CloudCLI 由终端或其他服务管理器启动，请在那里停止。'),
+          ],
+        ],
+      ),
+      const SizedBox(height: 16),
+      _card(
+        title: 'OpenCode SDK 服务',
+        icon: Icons.extension_outlined,
+        children: [
+          const Text(
+            '启动长期运行的 opencode serve，并把地址写入共享文件；'
+            'CloudCLI 每轮对话会自动 attach，不再重复拉起服务。',
+          ),
+          const SizedBox(height: 12),
+          SelectableText(openCodeStatus),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: openCodeBusy || openCodeRunning ? null : _startOpenCode,
+            icon: const Icon(Icons.play_arrow),
+            label: Text(openCodeBusy ? '正在启动…' : '启动 OpenCode 服务'),
+          ),
+          if (openCodeRunning && _openCodeManaged) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: openCodeBusy ? null : _stopOpenCode,
+              icon: const Icon(Icons.stop),
+              label: const Text('停止 OpenCode 服务'),
+            ),
+          ] else if (openCodeRunning) ...[
+            const SizedBox(height: 8),
+            const Text('OpenCode 由其他方式启动，请在原终端或服务管理器中停止。'),
+          ],
+          if (openCodeRunning && openCodePort != null) ...[
+            const SizedBox(height: 12),
+            SelectableText('本机地址：http://127.0.0.1:$openCodePort'),
+            if (selectedAddress != null)
+              SelectableText('手机地址：http://$selectedAddress:$openCodePort'),
+          ],
+        ],
+      ),
+      const SizedBox(height: 16),
+      _card(
+        title: '服务守护进程',
+        icon: Icons.monitor_heart_outlined,
+        children: [
+          const Text(
+            '开启后由常驻后台守护进程定时检查 CloudCLI 与 OpenCode 服务；'
+            '一旦发现没在运行就自动重新启动。登录后也会继续生效，'
+            '因此需要先启动过对应服务。',
+          ),
+          const SizedBox(height: 12),
+          SelectableText(watchdogStatus),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: watchdogBusy || watchdogEnabled ? null : _startWatchdog,
+            icon: const Icon(Icons.play_arrow),
+            label: Text(watchdogBusy ? '正在开启…' : '开启守护进程'),
+          ),
+          if (watchdogEnabled) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: watchdogBusy ? null : _stopWatchdog,
+              icon: const Icon(Icons.stop),
+              label: const Text('关闭守护进程'),
+            ),
+          ],
+        ],
+      ),
+    ]);
+  }
+
+  Widget _buildConnectionTab() {
+    final url = selectedAddress == null ? null : 'http://$selectedAddress:3001';
+    return _tabScroll([
+      _card(
+        title: '手机访问地址',
+        icon: Icons.wifi_tethering,
+        children: [
+          const Text('选择手机可以访问的地址（局域网或 Tailscale IPv4）。'),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            initialValue: selectedAddress,
+            items: [
+              for (final ip in addresses)
+                DropdownMenuItem(value: ip, child: Text(ip)),
+            ],
+            onChanged: (value) {
+              unawaited(_closePairing());
+              setState(() => selectedAddress = value);
+            },
+            decoration: const InputDecoration(
+              labelText: '局域网或 Tailscale IPv4 地址',
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 16),
+      _card(
+        title: '一次性二维码',
+        icon: Icons.qr_code_2_outlined,
+        children: [
+          if (!running || url == null)
+            const Text('先启动后台服务并选择地址，然后即可生成二维码。')
+          else ...[
+            OutlinedButton.icon(
+              onPressed: pairingBusy
+                  ? null
+                  : _pairToken == null
+                      ? _startPairing
+                      : _closePairing,
+              icon: Icon(_pairToken == null ? Icons.qr_code : Icons.close),
+              label: Text(_pairToken == null ? '显示一次性二维码' : '关闭二维码'),
+            ),
+            if (_pairToken != null) ...[
+              const SizedBox(height: 16),
+              Center(
+                child: QrImageView(
+                  data: '$url?pair=$_pairToken',
+                  size: 260,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '手机成功打开服务后，二维码会自动关闭；5 分钟后自动失效。',
+                textAlign: TextAlign.center,
+              ),
+            ],
+            const SizedBox(height: 12),
+            Center(child: SelectableText(url)),
+            const SizedBox(height: 12),
+            const Text(
+              '安卓基座扫码后可切换已保存的本地和 Tailscale 地址。服务随登录启动，允许 Mac 熄屏；合盖休眠仍会断开。',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ],
+      ),
+    ]);
+  }
+
+  Widget _buildFilesTab() {
+    return _tabScroll([
+      _card(
+        title: '临时文件中转站',
+        icon: Icons.swap_horiz_outlined,
+        children: [
+          const Text(
+            '把文件上传到临时中转服务并生成手机可直接打开的下载链接，'
+            '避免走 Tailscale 上传。链接会过期，仅用于临时分享。',
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<RelayProvider>(
+            initialValue: relayProvider,
+            decoration: const InputDecoration(labelText: '中转服务'),
+            items: [
+              for (final provider in RelayProvider.values)
+                DropdownMenuItem(
+                  value: provider,
+                  child: Text(provider.label),
+                ),
+            ],
+            onChanged: relayBusy
+                ? null
+                : (value) {
+                    if (value != null) {
+                      setState(() => relayProvider = value);
+                    }
+                  },
+          ),
+          if (relayPath.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            SelectableText('文件：$relayPath'),
+          ],
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: relayBusy ? null : _chooseRelayFile,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('选择文件'),
+              ),
+              FilledButton.icon(
+                onPressed: relayBusy || relayPath.isEmpty ? null : _uploadRelay,
+                icon: const Icon(Icons.cloud_upload_outlined),
+                label: Text(relayBusy ? '上传中…' : '上传并生成链接'),
+              ),
+            ],
+          ),
+          if (relayBusy) ...[
+            const SizedBox(height: 16),
+            LinearProgressIndicator(
+              value: relayProgress > 0 ? relayProgress : null,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${(relayProgress * 100).clamp(0, 100).toStringAsFixed(0)}%',
+            ),
+          ],
+          const SizedBox(height: 12),
+          SelectableText(relayStatus),
+          if (relayResult != null) ...[
+            const SizedBox(height: 16),
+            SelectableText(relayResult!.url),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _copyRelayLink,
+              icon: const Icon(Icons.copy),
+              label: const Text('复制链接'),
+            ),
+            const SizedBox(height: 16),
+            Center(
+              child: QrImageView(
+                data: relayResult!.url,
+                size: 200,
+                backgroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ],
+      ),
+    ]);
+  }
+
+  Widget _buildPermissionsTab() {
+    return _tabScroll([
+      _card(
+        title: '远程使用权限',
+        icon: Icons.verified_user_outlined,
+        children: [
+          const Text(
+            '离开 Mac 前检查文件和网络权限，完成后用手机连接一次。'
+            'macOS 的授权弹窗必须在电脑上确认。',
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: permissionBusy || selectedAddress == null
+                ? null
+                : _prepareRemoteAccess,
+            icon: const Icon(Icons.verified_user_outlined),
+            label: Text(permissionBusy ? '正在检查…' : '检查并准备远程权限'),
+          ),
+        ],
+      ),
+      const SizedBox(height: 16),
+      _buildDiskAccessCard(),
+    ]);
+  }
+}
+
+/// One program macOS can require in Full Disk Access. Owned by
+/// _DesktopConsolePageState and rendered by the disk-access card and the
+/// remote-access preparation dialog.
+class _DiskAccessTarget {
+  const _DiskAccessTarget({
+    required this.label,
+    required this.path,
+    this.isConsole = false,
+  });
+
+  /// Display name shown beside the resolved executable path.
+  final String label;
+
+  /// Absolute path to the executable or app bundle, or an empty string when it
+  /// could not be found on this Mac.
+  final String path;
+
+  /// True for this console bundle, whose own Full Disk Access state is the only
+  /// one the process can observe directly.
+  final bool isConsole;
 }

@@ -1,8 +1,8 @@
 import { sessionsDb } from '@/modules/database/index.js';
 import { sendDesktopTaskProgress } from '@/modules/notifications/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
+import { broadcastSessionActivity } from '@/modules/websocket/services/external-session-activity.service.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/services/session-upsert-broadcast.service.js';
-import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import type {
   LLMProvider,
   NormalizedMessage,
@@ -64,21 +64,6 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
  * path all consult it instead of asking each provider runtime individually.
  */
 const runs = new Map<string, ChatRun>();
-
-function broadcastSessionActivity(sessionId: string, isProcessing: boolean): void {
-  const payload = JSON.stringify({
-    kind: 'session_activity',
-    sessionId,
-    isProcessing,
-    timestamp: new Date().toISOString(),
-  });
-
-  connectedClients.forEach((client) => {
-    if (client.readyState === WS_OPEN_STATE) {
-      client.send(payload);
-    }
-  });
-}
 
 function evictRunLater(appSessionId: string): void {
   const timer = setTimeout(() => {
@@ -149,13 +134,16 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     } else if (message.kind === 'tool_result') {
       detail = '工具已完成，继续处理中';
     } else if (message.kind === 'permission_request') {
-      detail = '等待审批';
+      detail = message.toolName === 'AskUserQuestion' ? '等待回答' : '等待审批';
+    } else if (message.kind === 'permission_resolved' || message.kind === 'permission_cancelled') {
+      detail = '正在处理任务';
     } else if (message.kind === 'stream_delta' ||
       (message.kind === 'text' && message.role === 'assistant')) {
       detail = '正在生成回复';
     }
     if (detail && (detail !== run.notificationDetail || newStep)) {
       run.notificationDetail = detail;
+      broadcastSessionActivity(run.appSessionId, true, detail);
       sendDesktopTaskProgress(run.writer.userId, {
         sessionId: run.appSessionId,
         provider: run.provider,

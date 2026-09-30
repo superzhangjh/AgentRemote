@@ -35,7 +35,7 @@ const buildProject = (sessions: ProjectSession[]): Project => ({
   fullPath: '/repo',
   displayName: 'Repo',
   isStarred: false,
-  sessions,
+  sessions: sessions.map((session) => ({ ...session, __provider: 'opencode' })),
   sessionMeta: { hasMore: false, total: sessions.length },
 });
 
@@ -93,8 +93,10 @@ const renderProjectsState = async (navigate: ReturnType<typeof vi.fn>, urlSessio
   );
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   localStorage.clear();
+  const { writeSelectedProvider } = await import('@/shared/selectedProvider');
+  writeSelectedProvider('opencode');
   projectsResponse.mockReset();
   listeners.clear();
 });

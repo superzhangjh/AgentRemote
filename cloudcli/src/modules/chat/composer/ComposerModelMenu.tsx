@@ -25,6 +25,8 @@ type ComposerModelMenuProps = {
   modelOptions: ProviderModelOption[];
   onSelectModel: (model: string) => void;
   modelsLoading: boolean;
+  fastMode?: boolean;
+  onToggleFastMode?: () => void;
 };
 
 /**
@@ -39,6 +41,8 @@ function ComposerModelMenu({
   modelOptions,
   onSelectModel,
   modelsLoading,
+  fastMode,
+  onToggleFastMode,
 }: ComposerModelMenuProps) {
   const { t } = useTranslation('chat');
   const [isOpen, setIsOpen] = useState(false);
@@ -101,6 +105,16 @@ function ComposerModelMenu({
 
       {isOpen && anchor && createPortal(
         <ComposerMenuSurface anchor={anchor} menuRef={menuRef} ariaLabel={ariaLabel}>
+          {onToggleFastMode && (
+            <>
+              <ComposerMenuItem
+                label={t('composer.fastMode', { defaultValue: 'Fast mode' })}
+                isSelected={Boolean(fastMode)}
+                onSelect={() => { onToggleFastMode(); setIsOpen(false); }}
+              />
+              <ComposerMenuSeparator />
+            </>
+          )}
           {hasEffortSection && (
             <>
               <ComposerMenuHeading>

@@ -908,6 +908,44 @@ export function getOpenCodeDatabasePath(): string {
 }
 
 /**
+ * Resolves the descriptor file the AgentRemote macOS console writes when it
+ * starts a long-lived `opencode serve` instance.
+ *
+ * The descriptor lives in the user's home so the console, the CloudCLI server
+ * process, and the OpenCode readers agree on the server address without extra
+ * configuration. `AGENT_REMOTE_OPENCODE_STATE_FILE` overrides the path so tests
+ * can isolate state.
+ */
+export function resolveSharedOpenCodeServerFile(): string {
+  const override = process.env.AGENT_REMOTE_OPENCODE_STATE_FILE;
+  if (override && override.trim()) {
+    return override.trim();
+  }
+
+  return path.join(os.homedir(), '.agent-remote', 'opencode-server.json');
+}
+
+/**
+ * Reads the shared OpenCode server URL advertised by the AgentRemote console.
+ *
+ * Returns null when no console-managed server is running or the descriptor is
+ * unreadable, so callers fall back to their own behavior instead of failing.
+ * Used by the OpenCode runtime (to attach every turn to the one long-lived
+ * server) and the OpenCode model catalog (to read the server's authoritative
+ * provider/model list and reasoning variants).
+ */
+export function readSharedOpenCodeServerUrl(): string | null {
+  try {
+    const descriptor = JSON.parse(fs.readFileSync(resolveSharedOpenCodeServerFile(), 'utf8'));
+    return typeof descriptor?.url === 'string' && descriptor.url.trim()
+      ? descriptor.url.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Decodes an OpenCode text payload that was persisted as a JSON string literal.
  *
  * OpenCode can store the first user prompt (and other text parts) as `"hello"`

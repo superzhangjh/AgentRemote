@@ -3,6 +3,7 @@ import { useState } from 'react';
 
 import { api } from '@/shared/api';
 import type { ChatAttachment } from '@/shared/types';
+import { requestNativeDownload } from '@/shared/utils';
 
 type ChatMessageFilesProps = {
   files: ChatAttachment[];
@@ -37,6 +38,8 @@ function ChatMessageFile({ file }: { file: ChatAttachment }) {
 
     setIsDownloading(true);
     try {
+      if (requestNativeDownload(api.assets.fileUrl(storedName), name, file.mimeType)) return;
+
       const response = await api.assets.file(storedName);
       if (!response.ok) return;
       const blobUrl = URL.createObjectURL(await response.blob());

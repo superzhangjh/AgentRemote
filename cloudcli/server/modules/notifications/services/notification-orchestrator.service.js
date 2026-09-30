@@ -111,7 +111,7 @@ function resolveSessionRow(sessionId, provider) {
     return appSessionRow;
   }
 
-  const providerSessionRow = sessionsDb.getSessionByProviderSessionId(sessionId);
+  const providerSessionRow = sessionsDb.getSessionByProviderSessionId(sessionId, provider);
   if (rowMatchesProvider(providerSessionRow, provider)) {
     return providerSessionRow;
   }
@@ -283,6 +283,55 @@ function notifyBackgroundWorkCompleted({ userId, provider, sessionId = null, ses
   });
 }
 
+/**
+ * Reports that a tool needs the user's approval before a run can continue.
+ *
+ * Used by the OpenCode bridge when the provider server emits a
+ * `permission.updated` event for a session CloudCLI does not own. The kind is
+ * `action_required`, so it rides the existing "action required" preference.
+ */
+/**
+ * @param {{ userId: number, provider: string, sessionId?: string|null, toolName?: string|null, sessionName?: string|null }} input
+ */
+function notifyPermissionRequired({ userId, provider, sessionId = null, toolName = null, sessionName = null }) {
+  notifyUserIfEnabled({
+    userId,
+    event: createNotificationEvent({
+      provider,
+      sessionId,
+      kind: 'action_required',
+      code: 'permission.required',
+      meta: { toolName, sessionName },
+      severity: 'warning',
+      requiresUserAction: true,
+      dedupeKey: `${provider}:permission:${sessionId || 'none'}:${toolName || 'tool'}`,
+    }),
+  });
+}
+
+/**
+ * Reports that the agent asked the user a question and is waiting for an
+ * answer. Uses the action-required kind for the same preference as approvals.
+ */
+/**
+ * @param {{ userId: number, provider: string, sessionId?: string|null, question?: string|null, sessionName?: string|null }} input
+ */
+function notifyQuestionRequired({ userId, provider, sessionId = null, question = null, sessionName = null }) {
+  notifyUserIfEnabled({
+    userId,
+    event: createNotificationEvent({
+      provider,
+      sessionId,
+      kind: 'action_required',
+      code: 'agent.notification',
+      meta: { message: question, sessionName },
+      severity: 'warning',
+      requiresUserAction: true,
+      dedupeKey: `${provider}:question:${sessionId || 'none'}:${question || 'question'}`,
+    }),
+  });
+}
+
 function notifyRunFailed({ userId, provider, sessionId = null, error, sessionName = null }) {
   const errorMessage = normalizeErrorMessage(error);
 
@@ -306,5 +355,7 @@ export {
   notifyUserIfEnabled,
   notifyRunStopped,
   notifyRunFailed,
-  notifyBackgroundWorkCompleted
+  notifyBackgroundWorkCompleted,
+  notifyPermissionRequired,
+  notifyQuestionRequired
 };

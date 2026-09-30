@@ -72,7 +72,13 @@ const parseStartedAt = (value: unknown): number | undefined => {
 };
 
 /** Mounted by the project-workspace route; tracks which sessions are producing a response so chat, sidebar and project-workspace agree on session activity. */
-export function SessionProtectionProvider({ children }: { children: ReactNode }) {
+export function SessionProtectionProvider({
+  children,
+  sessionId,
+}: {
+  children: ReactNode;
+  sessionId?: string;
+}) {
   const {
     processingSessions,
     markSessionProcessing,
@@ -83,7 +89,7 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
 
   const refreshRunningSessions = useCallback(async () => {
     try {
-      const response = await api.runningSessions();
+      const response = await api.runningSessions(sessionId);
       if (!response.ok) {
         return;
       }
@@ -110,10 +116,27 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
     } catch (error) {
       console.error('[SessionProtection] Failed to sync running sessions:', error);
     }
-  }, [syncProcessingSessions]);
+  }, [sessionId, syncProcessingSessions]);
 
   useEffect(() => {
     void refreshRunningSessions();
+  }, [refreshRunningSessions]);
+
+  // A WebView that came back to the foreground can be minutes behind the 5s
+  // poll, so catch up immediately instead of leaving a stale activity
+  // indicator until the next tick.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshRunningSessions();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
   }, [refreshRunningSessions]);
 
   useEffect(() => {

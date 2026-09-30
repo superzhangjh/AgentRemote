@@ -38,6 +38,48 @@ const COMMON_WORKSPACE_DIRECTORY_NAMES = [
 // server heap before the browser has a chance to switch to a narrower project.
 const MAXIMUM_FILE_TREE_ENTRIES = 10_000;
 
+// Opening a multi-megabyte file in the text editor freezes the phone's WebView
+// and burns bandwidth through the tunnel, so the read endpoint refuses large
+// files and the UI offers a download instead.
+const MAXIMUM_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Parses a single HTTP `Range: bytes=...` request. Returns null for headers the
+ * service cannot satisfy (multi-range, unsatisfiable) so the caller streams the
+ * whole file with a 200 response; valid ranges drive 206 partial responses that
+ * make downloads show a real percentage and resume cleanly.
+ */
+function parseByteRange(
+  rangeHeader: string | null | undefined,
+  size: number,
+): { start: number; end: number } | null {
+  if (!rangeHeader || size <= 0) return null;
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+  if (!match) return null;
+
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === '' && rawEnd === '') return null;
+
+  let start: number;
+  let end: number;
+  if (rawStart === '') {
+    const suffixLength = Number.parseInt(rawEnd, 10);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+    start = Math.max(0, size - suffixLength);
+    end = size - 1;
+  } else {
+    start = Number.parseInt(rawStart, 10);
+    end = rawEnd === '' ? size - 1 : Number.parseInt(rawEnd, 10);
+  }
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
+    return null;
+  }
+
+  return { start, end: Math.min(end, size - 1) };
+}
+
 type FileTreeEntryFilter = (entryPath: string, isDirectory: boolean) => boolean;
 
 function includeEntryByHardExclusions(entryPath: string, isDirectory: boolean): boolean {
@@ -411,9 +453,28 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       const projectRoot = await resolveProjectRoot(projectId);
       const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
       try {
+        const stats = await fileSystem.stat(resolvedPath);
+        if (stats.size > MAXIMUM_TEXT_PREVIEW_BYTES) {
+          throw createFileTreeError(
+            'File is too large to open in the editor. Download it instead.',
+            413,
+            'FILE_TOO_LARGE_TO_PREVIEW',
+          );
+        }
         const content = await fileSystem.readTextFile(resolvedPath);
+        // A NUL byte is the classic signal of a binary payload saved with a
+        // text-looking extension; refuse it so the editor shows the binary
+        // placeholder instead of rendering garbage.
+        if (content.includes('\u0000')) {
+          throw createFileTreeError(
+            'File appears to be binary and cannot be edited as text.',
+            415,
+            'FILE_NOT_TEXT',
+          );
+        }
         return { content, path: resolvedPath };
       } catch (error) {
+        if (error instanceof AppError) throw error;
         mapFileSystemError(error, {
           ENOENT: { message: 'File not found', statusCode: 404 },
           EACCES: { message: 'Permission denied', statusCode: 403 },
@@ -421,18 +482,32 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
       }
     },
 
-    async openFile(projectId, filePath) {
+    async openFile(projectId, filePath, rangeHeader) {
       const projectRoot = await resolveProjectRoot(projectId);
       const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
+      let stats;
       try {
-        await fileSystem.access(resolvedPath);
+        stats = await fileSystem.stat(resolvedPath);
       } catch {
         throw createFileTreeError('File not found', 404, 'FILE_NOT_FOUND');
       }
+      if (stats.isDirectory()) {
+        throw createFileTreeError('Path is not a file', 400, 'NOT_A_FILE');
+      }
+
+      const size = stats.size;
+      const range = parseByteRange(rangeHeader, size);
+      const stream = size > 0
+        ? fileSystem.createReadStream(resolvedPath, range ?? { start: 0, end: size - 1 })
+        : fileSystem.createReadStream(resolvedPath);
 
       return {
         contentType: dependencies.resolveMimeType(resolvedPath),
-        stream: fileSystem.createReadStream(resolvedPath),
+        size,
+        start: range ? range.start : 0,
+        end: range ? range.end : size - 1,
+        partial: range !== null,
+        stream,
       };
     },
 

@@ -10,6 +10,7 @@ import { sessionsDb } from '@/modules/database/index.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
   ProviderCurrentActiveModel,
+  ProviderModelOption,
   ProviderModelsDefinition,
 } from '@/shared/types.js';
 import {
@@ -17,6 +18,7 @@ import {
   getOpenCodeDatabasePath,
   readObjectRecord,
   readOptionalString,
+  readSharedOpenCodeServerUrl,
 } from '@/shared/utils.js';
 
 /**
@@ -390,6 +392,86 @@ const filterOpenCodeModelsByProvider = (
   };
 };
 
+/** How long to wait for the OpenCode server before falling back to the CLI. */
+const OPENCODE_SERVER_REQUEST_TIMEOUT_MS = 5_000;
+
+/**
+ * Maps one OpenCode model's `variants` map onto CloudCLI effort choices.
+ *
+ * The server reports variants as `{ <name>: { ...config } }`, where each key is
+ * the `--variant` value CloudCLI passes to `opencode run` (for example `low`,
+ * `high`, `max`). Variants flagged `disabled` are omitted so the picker never
+ * offers a level the CLI would reject.
+ */
+const readOpenCodeEffortValues = (
+  variants: unknown,
+): NonNullable<ProviderModelOption['effort']>['values'] => {
+  const record = readObjectRecord(variants);
+  if (!record) {
+    return [];
+  }
+
+  return Object.entries(record)
+    .filter(([, config]) => readObjectRecord(config)?.disabled !== true)
+    .map(([value]) => ({ value }));
+};
+
+/**
+ * Reads the provider/model catalog from a running OpenCode server.
+ *
+ * `GET /config/providers` is the source the OpenCode client itself renders
+ * from, so the models and their reasoning `variants` match the client exactly -
+ * unlike the curated catalog, which only covers a subset. Returns null when the
+ * server is unreachable or reports no models, so the caller keeps its fallback.
+ */
+const readOpenCodeServerModelOptions = async (
+  serverUrl: string,
+): Promise<ProviderModelOption[] | null> => {
+  const baseUrl = serverUrl.replace(/\/+$/, '');
+  let payload: Record<string, unknown>;
+  try {
+    const response = await fetch(`${baseUrl}/config/providers`, {
+      signal: AbortSignal.timeout(OPENCODE_SERVER_REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      return null;
+    }
+    payload = readObjectRecord(await response.json()) ?? {};
+  } catch {
+    return null;
+  }
+
+  const providers = Array.isArray(payload.providers) ? payload.providers : [];
+  const options: ProviderModelOption[] = [];
+
+  for (const providerValue of providers) {
+    const provider = readObjectRecord(providerValue);
+    const providerId = readOptionalString(provider?.id);
+    const models = readObjectRecord(provider?.models);
+    if (!providerId || !models) {
+      continue;
+    }
+
+    const providerLabel = readOptionalString(provider?.name) ?? providerId;
+    for (const [modelId, modelValue] of Object.entries(models)) {
+      const model = readObjectRecord(modelValue);
+      if (!model) {
+        continue;
+      }
+
+      const effortValues = readOpenCodeEffortValues(model.variants);
+      options.push({
+        value: `${providerId}/${modelId}`,
+        label: readOptionalString(model.name) ?? modelId,
+        description: providerLabel,
+        ...(effortValues.length > 0 ? { effort: { values: effortValues } } : {}),
+      });
+    }
+  }
+
+  return options.length > 0 ? options : null;
+};
+
 const parseOpenCodeSessionModelValue = (rawModel: unknown): string | null => {
   if (typeof rawModel === 'string') {
     const trimmed = rawModel.trim();
@@ -429,6 +511,23 @@ export class OpenCodeProviderModels implements IProviderModels {
       OPENCODE_PREDEFINED_MODELS,
       await readConnectedOpenCodeProviderIds(),
     );
+
+    // A running AgentRemote-managed server is the OpenCode client's own source
+    // of truth: its catalog and reasoning variants match what the user sees in
+    // OpenCode itself. Prefer it, and fall back to CLI discovery when absent.
+    const serverUrl = readSharedOpenCodeServerUrl();
+    if (serverUrl) {
+      const serverOptions = await readOpenCodeServerModelOptions(serverUrl);
+      if (serverOptions) {
+        return {
+          OPTIONS: serverOptions,
+          DEFAULT: serverOptions.some((option) => option.value === fallback.DEFAULT)
+            ? fallback.DEFAULT
+            : serverOptions[0].value,
+        };
+      }
+    }
+
     try {
       // Ask the installed OpenCode CLI so newly released and configured models
       // appear without waiting for CloudCli's curated catalog to be updated.

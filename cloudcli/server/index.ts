@@ -7,12 +7,14 @@ import os from 'os';
 import http from 'http';
 
 import express, { type NextFunction, type Request, type Response } from 'express';
+import compression from 'compression';
 import cors from 'cors';
 
 import { AppError, findApplicationRoot, getModuleDirectory, IS_PLATFORM, terminalTextStyles } from '@/shared/utils.js';
 import {
     closeSessionsWatcher,
     initializeSessionsWatcher,
+    installOpenCodePermissionGateway,
     providerRuntimeService,
 } from '@/modules/providers/index.js';
 import { createWebSocketServer } from '@/modules/websocket/index.js';
@@ -56,6 +58,11 @@ import { browserUseService } from './modules/browser-use/browser-use.service.js'
 import { initializeDatabase, sessionsDb } from './modules/database/index.js';
 import { configureWebPush } from './modules/notifications/index.js';
 import { pairingRoutes } from './modules/pairing/index.js';
+import {
+    openCodePermissionGateway,
+    startOpenCodeBridge,
+    stopOpenCodeBridge,
+} from './modules/opencode-bridge/index.js';
 
 const __dirname = getModuleDirectory(import.meta.url);
 // The server source runs from /server, while the compiled output runs from /dist-server/server.
@@ -122,6 +129,19 @@ createWebSocketServer(server, {
 });
 
 app.use(cors({ exposedHeaders: ['X-Refreshed-Token', 'X-Auth-Error'] }));
+// Gzip/deflate every compressible response so the ~8.5 MB asset bundle and the
+// large /api JSON payloads shrink dramatically over slow links such as a phone
+// on Tailscale. Server-sent event streams are excluded because compression
+// buffers chunks and would stall their incremental delivery.
+app.use(compression({
+    filter: (req, res) => {
+        const contentType = res.getHeader('Content-Type');
+        if (typeof contentType === 'string' && contentType.includes('text/event-stream')) {
+            return false;
+        }
+        return compression.filter(req, res);
+    },
+}));
 app.use(express.json({
     limit: '50mb',
     type: (req) => {
@@ -202,8 +222,20 @@ app.use('/api/agent', agentRoutes);
 
 app.use('/api/voice', authenticateToken, voiceRoutes);
 
-// Serve public files (like api-docs.html)
-app.use(express.static(path.join(APP_ROOT, 'public')));
+// Serve public files (like api-docs.html). The service worker must always be
+// revalidated so a new build can take over, but the icons and logos it lists
+// are safe to cache, which avoids needless round-trips over Tailscale.
+app.use(express.static(path.join(APP_ROOT, 'public'), {
+    setHeaders: (res, filePath) => {
+        if (path.basename(filePath) === 'sw.js') {
+            res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+        } else if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        } else {
+            res.setHeader('Cache-Control', 'public, max-age=604800');
+        }
+    },
+}));
 
 // Static files served after API routes
 // Add cache control: HTML files should not be cached, but assets can be cached
@@ -368,6 +400,12 @@ async function startServer() {
 
             // Start watching the projects folder for changes
             await initializeSessionsWatcher();
+            // Give the OpenCode runtime the bridge's approval gateway before
+            // the bridge starts so approvals can be answered from any client.
+            installOpenCodePermissionGateway(openCodePermissionGateway);
+            // Mirror activity from an externally-managed OpenCode server so the
+            // phone shows running state and approval/question notifications.
+            startOpenCodeBridge();
             // Sends anything that came due while the server was not running,
             // then keeps polling.
             initializeScheduledMessageDispatcher(providerRuntimeService);
@@ -379,6 +417,7 @@ async function startServer() {
         });
 
         await closeSessionsWatcher();
+        stopOpenCodeBridge();
         closeScheduledMessageDispatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {

@@ -11,6 +11,7 @@ import type { PendingPermissionRequest, PermissionMode,
   ProviderModelsDefinition } from '@/shared/types';
 import { DEFAULT_EFFORT_VALUE } from '@/shared/constants';
 import { readSelectedProvider, writeSelectedProvider } from '@/shared/selectedProvider';
+import { subscribeToUserPreferences } from '@/shared/userSettings';
 
 const FALLBACK_PROVIDER_EFFORT_VALUES: Partial<Record<LLMProvider, readonly string[]>> = {
   // Superset used only before the model catalog loads; `ultracode` belongs to the
@@ -131,6 +132,18 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   // storage per render because switching it has to reset the model menu, the
   // permission mode and the session in one commit.
   const [provider, setProvider] = useState<LLMProvider>(readSelectedProvider);
+  const sessionOwnerProvider = selectedSession?.__provider ?? selectedSession?.provider;
+
+  useEffect(() => {
+    if (sessionOwnerProvider) {
+      return undefined;
+    }
+
+    const syncProvider = () => setProvider(readSelectedProvider());
+    syncProvider();
+    return subscribeToUserPreferences(syncProvider);
+  }, [sessionOwnerProvider]);
+
   // Every provider's chosen model, not just the active one: switching provider
   // must restore the model that provider was last used with, and the catalogue
   // that validates them arrives asynchronously per provider.
@@ -423,13 +436,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   }, [selectedSession?.id, provider, getDefaultPermissionModeForProvider, getPermissionModesForProvider]);
 
   useEffect(() => {
-    if (!selectedSession?.__provider || selectedSession.__provider === provider) {
+    if (!sessionOwnerProvider || sessionOwnerProvider === provider) {
       return;
     }
 
-    setProvider(selectedSession.__provider);
-    writeSelectedProvider(selectedSession.__provider);
-  }, [provider, selectedSession]);
+    setProvider(sessionOwnerProvider);
+    writeSelectedProvider(sessionOwnerProvider);
+  }, [provider, sessionOwnerProvider]);
 
   // Permission prompts belong to a session, not to the transient provider
   // selection that is synchronized after navigation.

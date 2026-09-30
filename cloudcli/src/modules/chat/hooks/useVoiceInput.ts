@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { transcribeVoice } from '@/shared/api';
+import {
+  cancelNativeVoice,
+  hasNativeVoice,
+  startNativeVoice,
+  stopNativeVoice,
+  subscribeNativeVoice,
+} from '@/shared/nativeVoice';
 import type { VoiceInputState } from '@/shared/types';
 
 // Mobile-safe recording: iOS Safari 18.4+ supports webm/opus; older iOS needs mp4.
@@ -25,9 +32,10 @@ function pickMime(): string {
 
 
 /**
- * Push-to-talk dictation. Records the mic, uploads to /api/voice/transcribe
- * (an OpenAI-compatible speech-to-text backend via the Express proxy), and
- * returns the transcript through onTranscript.
+ * Push-to-talk dictation. Inside the Android shell it drives the native on-device
+ * recognizer through the bridge in `shared/nativeVoice`; in a browser it records the
+ * mic and uploads to /api/voice/transcribe (an OpenAI-compatible speech-to-text
+ * backend via the Express proxy). Either way the transcript returns through onTranscript.
  */
 export function useVoiceInput(
   onTranscript: (text: string, send?: boolean) => void,
@@ -41,25 +49,84 @@ export function useVoiceInput(
   const startingRef = useRef(false);
   // Whether the in-progress stop should auto-send the transcript (vs just fill the box).
   const sendRef = useRef(false);
+  // Native recognition is decided once per mount; the shell does not appear mid-session.
+  const nativeRef = useRef(hasNativeVoice());
+  // Native events arrive asynchronously through a global bridge, so callbacks and the
+  // send intent are kept in refs to avoid resubscribing on every render.
+  const nativeTranscriptRef = useRef(onTranscript);
+  const nativeErrorRef = useRef(onError);
+  const nativeSendRef = useRef(false);
+  const nativeActiveRef = useRef(false);
+
+  useEffect(() => {
+    nativeTranscriptRef.current = onTranscript;
+    nativeErrorRef.current = onError;
+  }, [onTranscript, onError]);
 
   const stopTracks = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
   };
 
-  // Stop the mic if the component unmounts mid-recording.
+  // Route native recognizer events into the same transcript/error callbacks.
+  useEffect(() => {
+    if (!nativeRef.current) return;
+    return subscribeNativeVoice((event) => {
+      switch (event.type) {
+        case 'final': {
+          const shouldSend = nativeSendRef.current;
+          nativeSendRef.current = false;
+          nativeActiveRef.current = false;
+          setState('idle');
+          if (event.text) nativeTranscriptRef.current(event.text, shouldSend);
+          else nativeErrorRef.current?.('No speech detected');
+          break;
+        }
+        case 'empty':
+          nativeSendRef.current = false;
+          nativeActiveRef.current = false;
+          setState('idle');
+          nativeErrorRef.current?.('No speech detected');
+          break;
+        case 'error':
+          nativeSendRef.current = false;
+          nativeActiveRef.current = false;
+          setState('idle');
+          nativeErrorRef.current?.(event.message || 'Transcription failed');
+          break;
+        case 'ready':
+        case 'processing':
+        case 'partial':
+          // Partial transcripts are intentionally ignored; only the final result is used.
+          break;
+      }
+    });
+  }, []);
+
+  // Stop the mic or the native recognizer if the component unmounts mid-recording.
   useEffect(() => {
     cancelledRef.current = false;
+    const usesNativeVoice = nativeRef.current;
     return () => {
       cancelledRef.current = true;
       startingRef.current = false;
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       recorderRef.current = null;
+      if (usesNativeVoice && nativeActiveRef.current) cancelNativeVoice();
+      nativeActiveRef.current = false;
     };
   }, []);
 
   const start = useCallback(async () => {
+    if (nativeRef.current) {
+      if (nativeActiveRef.current) return;
+      nativeActiveRef.current = true;
+      nativeSendRef.current = false;
+      setState('recording');
+      startNativeVoice(typeof navigator !== 'undefined' ? navigator.language : undefined);
+      return;
+    }
     if (startingRef.current || (recorderRef.current && recorderRef.current.state !== 'inactive')) return;
     startingRef.current = true;
     try {
@@ -133,6 +200,14 @@ export function useVoiceInput(
   // Guard on the recorder's own state (not React state) so a double tap, or the mic
   // and Send buttons both firing, can't call stop() on an already-inactive recorder.
   const stop = useCallback((opts?: { send?: boolean }) => {
+    if (nativeRef.current) {
+      if (!nativeActiveRef.current) return;
+      nativeSendRef.current = opts?.send ?? false;
+      nativeActiveRef.current = false;
+      setState('transcribing');
+      stopNativeVoice();
+      return;
+    }
     const rec = recorderRef.current;
     if (rec && rec.state !== 'inactive') {
       sendRef.current = opts?.send ?? false;

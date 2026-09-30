@@ -67,6 +67,7 @@ function createStore(messagesBySession: Map<string, NormalizedMessage[]>) {
   // A hydrated slot, so the session-loading effect takes its early return
   // instead of re-fetching on every render.
   const slotFor = (sessionId: string) => ({
+    provider: 'claude' as const,
     fetchedAt: 1,
     status: 'idle' as const,
     total: messagesBySession.get(sessionId)?.length ?? 0,
@@ -75,10 +76,11 @@ function createStore(messagesBySession: Map<string, NormalizedMessage[]>) {
   });
 
   return {
+    hydrateFromCache: vi.fn(async (sessionId: string) => slotFor(sessionId)),
     fetchFromServer: vi.fn(async (sessionId: string) => slotFor(sessionId)),
     fetchMore: vi.fn(async (sessionId: string) => ({ slot: slotFor(sessionId), prependedCount: 0 })),
     appendRealtime: vi.fn(),
-    refreshLatestFromServer: vi.fn(async (sessionId: string) => ({
+    refreshLatestFromServer: vi.fn(async (sessionId: string, _options?: { beforeApply?: (messages: NormalizedMessage[]) => void }) => ({
       slot: slotFor(sessionId),
       applied: true,
       changed: false,
@@ -125,6 +127,53 @@ beforeEach(() => {
   vi.stubGlobal('requestAnimationFrame', () => 0);
   vi.stubGlobal('cancelAnimationFrame', () => undefined);
   localStorage.clear();
+});
+
+describe('cached transcript scroll stability', () => {
+  it('reveals older cached rows automatically and keeps the visible row anchored', async () => {
+    const messages = new Map<string, NormalizedMessage[]>([
+      [SESSION_A, Array.from({ length: 250 }, (_, index) => buildMessage(index, new Date(index * 1000).toISOString()))],
+    ]);
+    const store = createStore(messages);
+    const { result } = await renderChatSessionState({ session: { id: SESSION_A } as ProjectSession, store });
+    await act(async () => {});
+    const container = createContainer(5000, 500);
+    const anchor = document.createElement('div');
+    anchor.className = 'chat-message';
+    anchor.getBoundingClientRect = vi.fn()
+      .mockReturnValueOnce({ top: 10, bottom: 100 })
+      .mockReturnValueOnce({ top: 10, bottom: 100 })
+      .mockReturnValue({ top: 1010, bottom: 1100 });
+    container.element.appendChild(anchor);
+    document.body.appendChild(container.element);
+    (result.current.scrollContainerRef as { current: HTMLDivElement | null }).current = container.element;
+    container.element.scrollTop = 5;
+    await act(async () => { await result.current.handleScroll(); });
+    expect(result.current.visibleMessages).toHaveLength(200);
+    expect(container.element.scrollTop).toBe(1005);
+    expect(store.fetchMore).not.toHaveBeenCalled();
+    container.element.remove();
+  });
+
+  it('keeps the row being read inside the render window when latest history adds new rows', async () => {
+    const previous = Array.from({ length: 250 }, (_, index) => buildMessage(index, new Date(index * 1000).toISOString()));
+    const messages = new Map<string, NormalizedMessage[]>([[SESSION_A, previous]]);
+    const store = createStore(messages);
+    const { result } = await renderChatSessionState({ session: { id: SESSION_A } as ProjectSession, store });
+    await act(async () => {});
+    const container = createContainer(5000, 500);
+    (result.current.scrollContainerRef as { current: HTMLDivElement | null }).current = container.element;
+    act(() => { result.current.setIsUserScrolledUp(true); });
+    const next = Array.from({ length: 350 }, (_, index) => buildMessage(index, new Date(index * 1000).toISOString()));
+    store.refreshLatestFromServer.mockImplementation(async (sessionId, options) => {
+      options?.beforeApply?.(next);
+      messages.set(sessionId, next);
+      return { slot: store.getSessionSlot(sessionId), applied: true, changed: true, deferred: false };
+    });
+    await act(async () => { await result.current.requestLatestMessages(SESSION_A); });
+    expect(result.current.visibleMessages).toHaveLength(200);
+    expect(result.current.visibleMessages[0].content).toBe('message 150');
+  });
 });
 
 afterEach(() => {

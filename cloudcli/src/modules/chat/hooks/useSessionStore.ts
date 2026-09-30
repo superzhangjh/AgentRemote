@@ -4,10 +4,11 @@
  * Holds per-session state in a Map keyed by sessionId.
  * Session switch = change activeSessionId pointer. No clearing. Old data stays.
  * WebSocket handler = store.appendRealtime(msg.sessionId, msg). One line.
- * No localStorage for messages. Backend JSONL is the source of truth.
+ * IndexedDB keeps fetched provider history across page reloads; the backend
+ * remains the source of truth for reconciliation.
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api } from '@/shared/api';
 import type { LLMProvider, NormalizedMessage } from '@/shared/types';
@@ -21,6 +22,8 @@ import {
   SESSION_MESSAGES_PAGE_SIZE,
 } from '@/modules/chat/utils/sessionMessagePagination';
 import type { SessionMessagesRequestOptions } from '@/modules/chat/utils/sessionMessagePagination';
+import { readSessionHistory, writeSessionHistory } from '@/modules/chat/utils/sessionHistoryPersistence';
+import { readSelectedProvider } from '@/shared/selectedProvider';
 
 // ─── NormalizedMessage (mirrors server/adapters/types.js) ────────────────────
 
@@ -30,6 +33,13 @@ import type { SessionMessagesRequestOptions } from '@/modules/chat/utils/session
 export type SessionStatus = 'idle' | 'loading' | 'streaming' | 'error';
 
 export type SessionSlot = {
+  /** Cache identity is captured before async work so a provider switch cannot redirect its writes. */
+  provider: LLMProvider;
+  cacheKey: string | null;
+  /** Prevents repeated disk reads, including for a live-only or empty cache. */
+  _cacheHydrated: boolean;
+  /** Coalesces finalized realtime rows without writing every stream delta. */
+  _persistTimer: ReturnType<typeof setTimeout> | null;
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
   merged: NormalizedMessage[];
@@ -52,8 +62,12 @@ export type SessionSlot = {
 const EMPTY: NormalizedMessage[] = [];
 const SESSION_HISTORY_REQUEST_TIMEOUT_MS = 30_000;
 
-function createEmptySlot(): SessionSlot {
+function createEmptySlot(provider: LLMProvider, cacheKey: string | null): SessionSlot {
   return {
+    provider,
+    cacheKey,
+    _cacheHydrated: false,
+    _persistTimer: null,
     serverMessages: EMPTY,
     realtimeMessages: EMPTY,
     merged: EMPTY,
@@ -97,6 +111,7 @@ function enqueueHistoryMutation<T>(
 async function requestSessionHistoryPage(
   sessionId: string,
   options: SessionMessagesRequestOptions,
+  provider: LLMProvider,
 ): Promise<SessionHistoryPage> {
   const response = await api.providers.sessionMessages(sessionId, options, {
     signal: AbortSignal.timeout(SESSION_HISTORY_REQUEST_TIMEOUT_MS),
@@ -106,6 +121,9 @@ async function requestSessionHistoryPage(
   const body = await response.json();
   const data = body?.data ?? body;
   const messages: NormalizedMessage[] = Array.isArray(data.messages) ? data.messages : [];
+  if (messages.some((message) => !message || message.sessionId !== sessionId || message.provider !== provider)) {
+    throw new Error('Session history identity mismatch');
+  }
 
   return {
     messages,
@@ -424,6 +442,7 @@ async function refreshLatestSlotFromServer(
   slot: SessionSlot,
   limit: number,
   canRequest: CanRequestHistory = () => true,
+  beforeApply?: (messages: NormalizedMessage[]) => void,
 ): Promise<LatestHistoryRefreshResult> {
   if (!canRequest()) {
     return { applied: false, changed: false, deferred: true };
@@ -435,7 +454,7 @@ async function refreshLatestSlotFromServer(
   const latestPage = await requestSessionHistoryPage(sessionId, {
     limit,
     offset: 0,
-  });
+  }, slot.provider);
 
   let nextServerMessages: NormalizedMessage[] | null = null;
   let nextHasMore = previousHasMore;
@@ -471,7 +490,7 @@ async function refreshLatestSlotFromServer(
         return { applied: false, changed: false, deferred: true };
       }
 
-      const bridgePage = await requestSessionHistoryPage(sessionId, bridgeRequest);
+      const bridgePage = await requestSessionHistoryPage(sessionId, bridgeRequest, slot.provider);
       if (bridgePage.total !== latestPage.total) {
         console.warn(`[SessionStore] History changed while bridging ${sessionId}; retaining cached suffix.`);
         return { applied: false, changed: false, deferred: false };
@@ -526,6 +545,7 @@ async function refreshLatestSlotFromServer(
     return { applied: false, changed, deferred: false };
   }
 
+  beforeApply?.(nextServerMessages);
   slot.serverMessages = nextServerMessages;
   slot.total = latestPage.total;
   slot.offset = nextServerMessages.length;
@@ -544,12 +564,12 @@ async function refreshLatestSlotFromServer(
 
 const STALE_THRESHOLD_MS = 30_000;
 
-const MAX_REALTIME_MESSAGES = 500;
-
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
-export function useSessionStore() {
-  const storeRef = useRef(new Map<string, SessionSlot>());
+export function useSessionStore(accountKey: string | null = 'anonymous') {
+  // Each account gets its own in-memory map. In-flight callbacks retain the
+  // old map and cache keys when authentication changes.
+  const store = useMemo(() => new Map<string, SessionSlot>(), [accountKey]);
   const activeSessionIdRef = useRef<string | null>(null);
   // Bump to force re-render — only when the active session's data changes.
   // Session ids are stable for the whole conversation lifetime (the backend
@@ -566,13 +586,86 @@ export function useSessionStore() {
     activeSessionIdRef.current = sessionId;
   }, []);
 
-  const getSlot = useCallback((sessionId: string): SessionSlot => {
-    const store = storeRef.current;
-    if (!store.has(sessionId)) {
-      store.set(sessionId, createEmptySlot());
+  const getSlot = useCallback((sessionId: string, provider?: LLMProvider): SessionSlot => {
+    const existing = store.get(sessionId);
+    if (!existing || (provider && existing.provider !== provider)) {
+      const resolvedProvider = provider ?? readSelectedProvider();
+      const cacheKey = accountKey === null ? null : JSON.stringify([
+        window.location.origin, accountKey, resolvedProvider, sessionId,
+      ]);
+      store.set(sessionId, createEmptySlot(resolvedProvider, cacheKey));
     }
     return store.get(sessionId)!;
-  }, []);
+  }, [accountKey, store]);
+
+  const hydrateFromCache = useCallback(async (sessionId: string, provider?: LLMProvider) => {
+    const slot = getSlot(sessionId, provider);
+    return enqueueHistoryMutation(slot, async () => {
+      if (slot._cacheHydrated || slot.fetchedAt) return slot;
+      const cached = slot.cacheKey ? await readSessionHistory(slot.cacheKey) : null;
+      slot._cacheHydrated = true;
+      if (!cached || cached.cacheKey !== slot.cacheKey || cached.sessionId !== sessionId
+        || !Array.isArray(cached.messages) || !Array.isArray(cached.realtimeMessages)
+        || !Number.isFinite(cached.total) || !Number.isFinite(cached.fetchedAt)
+        || typeof cached.hasMore !== 'boolean'
+        || [...cached.messages, ...cached.realtimeMessages].some((message) =>
+          !message || message.sessionId !== sessionId || message.provider !== slot.provider,
+        )) return slot;
+      slot.serverMessages = cached.messages;
+      const liveIds = new Set(slot.realtimeMessages.map((message) => message.id));
+      slot.realtimeMessages = pruneRealtimeSupersededByServer(slot.serverMessages, [
+        ...cached.realtimeMessages.filter((message) => !liveIds.has(message.id)),
+        ...slot.realtimeMessages,
+      ]);
+      slot.total = cached.total;
+      slot.hasMore = cached.hasMore;
+      slot.offset = cached.messages.length;
+      slot.fetchedAt = cached.fetchedAt;
+      recomputeMergedIfNeeded(slot);
+      notify(sessionId);
+      return slot;
+    });
+  }, [getSlot, notify]);
+
+
+  const persistSlot = useCallback(function saveSlot(sessionId: string, slot: SessionSlot): void {
+    if (slot._persistTimer) clearTimeout(slot._persistTimer);
+    slot._persistTimer = null;
+    if (!slot.cacheKey) return;
+    if (store.get(sessionId) !== slot) return;
+    if (!slot._cacheHydrated && !slot.fetchedAt) {
+      void hydrateFromCache(sessionId, slot.provider).then(() => saveSlot(sessionId, slot));
+      return;
+    }
+    void writeSessionHistory({
+      cacheKey: slot.cacheKey,
+      sessionId,
+      messages: slot.serverMessages,
+      realtimeMessages: slot.realtimeMessages.filter((message) => message.kind !== 'stream_delta'),
+      total: slot.total,
+      hasMore: slot.hasMore,
+      fetchedAt: slot.fetchedAt,
+    });
+  }, [hydrateFromCache, store]);
+
+  const queuePersistSlot = useCallback((sessionId: string, slot: SessionSlot) => {
+    if (slot._persistTimer) return;
+    slot._persistTimer = setTimeout(() => persistSlot(sessionId, slot), 250);
+  }, [persistSlot]);
+
+  useEffect(() => {
+    const flush = () => {
+      for (const [sessionId, slot] of store) {
+        if (slot._persistTimer) persistSlot(sessionId, slot);
+      }
+    };
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      flush();
+    };
+  }, [persistSlot, store]);
+
 
   /**
    * Fetch messages from the provider sessions endpoint and populate serverMessages.
@@ -586,6 +679,7 @@ export function useSessionStore() {
       limit?: number | null;
       offset?: number;
       canRequest?: CanRequestHistory;
+      beforeApply?: (messages: NormalizedMessage[]) => void;
     } = {},
   ) => {
     const slot = getSlot(sessionId);
@@ -593,7 +687,7 @@ export function useSessionStore() {
     notify(sessionId);
 
     return enqueueHistoryMutation(slot, async () => {
-      const { canRequest = () => true, ...requestOptions } = opts;
+      const { canRequest = () => true, beforeApply, ...requestOptions } = opts;
       if (!canRequest()) {
         slot.status = 'idle';
         notify(sessionId);
@@ -601,7 +695,8 @@ export function useSessionStore() {
       }
 
       try {
-        const data = await requestSessionHistoryPage(sessionId, requestOptions);
+        const data = await requestSessionHistoryPage(sessionId, requestOptions, slot.provider);
+        beforeApply?.(data.messages);
         slot.serverMessages = data.messages;
         slot.total = data.total;
         slot.hasMore = data.hasMore;
@@ -617,6 +712,7 @@ export function useSessionStore() {
           slot.tokenUsage = data.tokenUsage;
         }
 
+        persistSlot(sessionId, slot);
         notify(sessionId);
         return slot;
       } catch (error) {
@@ -626,7 +722,7 @@ export function useSessionStore() {
         return slot;
       }
     });
-  }, [getSlot, notify]);
+  }, [getSlot, notify, persistSlot]);
 
   /**
    * Load older (paginated) messages and prepend to serverMessages.
@@ -657,7 +753,7 @@ export function useSessionStore() {
           const data = await requestSessionHistoryPage(sessionId, {
             limit: opts.limit ?? SESSION_MESSAGES_PAGE_SIZE,
             offset: slot.offset,
-          });
+          }, slot.provider);
           const olderMerge = mergeOlderServerPage(cachedMessages, data.messages);
           const shiftedWhileFetching = (
             data.total !== expectedTotal
@@ -691,7 +787,10 @@ export function useSessionStore() {
           break;
         }
 
-        if (changed) notify(sessionId);
+        if (changed) {
+          persistSlot(sessionId, slot);
+          notify(sessionId);
+        }
         return { slot, prependedCount };
       } catch (error) {
         console.error(`[SessionStore] fetchMore failed for ${sessionId}:`, error);
@@ -699,7 +798,7 @@ export function useSessionStore() {
         return { slot, prependedCount };
       }
     });
-  }, [getSlot, notify]);
+  }, [getSlot, notify, persistSlot]);
 
   /**
    * Append a realtime (WebSocket) message to the correct session slot.
@@ -714,7 +813,7 @@ export function useSessionStore() {
    * just the one that made the edit.
    */
   const truncateAt = useCallback((sessionId: string, anchorId: string) => {
-    const slot = storeRef.current.get(sessionId);
+    const slot = store.get(sessionId);
     if (!slot) return;
 
     const cutIndex = slot.serverMessages.findIndex(
@@ -745,23 +844,23 @@ export function useSessionStore() {
     slot.total = slot.serverMessages.length;
     slot.offset = slot.serverMessages.length;
     recomputeMergedIfNeeded(slot);
+    persistSlot(sessionId, slot);
     notify(sessionId);
-  }, [notify]);
+  }, [notify, persistSlot, store]);
 
   const appendRealtime = useCallback((sessionId: string, msg: NormalizedMessage) => {
-    const slot = getSlot(sessionId);
-    const normalizedMessage =
-      msg.sessionId === sessionId
-        ? msg
-        : { ...msg, sessionId };
-    let updated = [...slot.realtimeMessages, normalizedMessage];
-    if (updated.length > MAX_REALTIME_MESSAGES) {
-      updated = updated.slice(-MAX_REALTIME_MESSAGES);
-    }
-    slot.realtimeMessages = updated;
+    if (msg.sessionId !== sessionId) return;
+    const existing = store.get(sessionId);
+    if (existing && existing.provider !== msg.provider) return;
+    const slot = getSlot(sessionId, msg.provider);
+    const index = slot.realtimeMessages.findIndex((message) => message.id === msg.id);
+    slot.realtimeMessages = index < 0
+      ? [...slot.realtimeMessages, msg]
+      : slot.realtimeMessages.map((message, rowIndex) => rowIndex === index ? msg : message);
     recomputeMergedIfNeeded(slot);
+    if (msg.kind !== 'stream_delta') queuePersistSlot(sessionId, slot);
     notify(sessionId);
-  }, [getSlot, notify]);
+  }, [getSlot, notify, queuePersistSlot, store]);
 
   /**
    * Refreshes only the persisted tail and stitches it onto the contiguous
@@ -773,6 +872,7 @@ export function useSessionStore() {
     opts: {
       limit?: number;
       canRequest?: CanRequestHistory;
+      beforeApply?: (messages: NormalizedMessage[]) => void;
     } = {},
   ) => {
     const slot = getSlot(sessionId);
@@ -784,31 +884,36 @@ export function useSessionStore() {
           slot,
           opts.limit ?? SESSION_MESSAGES_PAGE_SIZE,
           opts.canRequest,
+          opts.beforeApply,
         );
-        if (result.changed) notify(sessionId);
+        if (result.changed) {
+          persistSlot(sessionId, slot);
+          notify(sessionId);
+        }
         return { slot, ...result };
       } catch (error) {
         console.error(`[SessionStore] latest refresh failed for ${sessionId}:`, error);
         return { slot, applied: false, changed: false, deferred: false };
       }
     });
-  }, [getSlot, notify]);
+  }, [getSlot, notify, persistSlot]);
 
   /**
    * Check if a session's data is stale (>30s old).
    */
   const isStale = useCallback((sessionId: string) => {
-    const slot = storeRef.current.get(sessionId);
+    const slot = store.get(sessionId);
     if (!slot) return true;
     return Date.now() - slot.fetchedAt > STALE_THRESHOLD_MS;
-  }, []);
+  }, [store]);
 
   /**
    * Update or create a streaming message (accumulated text so far).
    * Uses a well-known ID so subsequent calls replace the same message.
    */
   const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: LLMProvider) => {
-    const slot = getSlot(sessionId);
+    if (store.has(sessionId) && store.get(sessionId)!.provider !== msgProvider) return;
+    const slot = getSlot(sessionId, msgProvider);
     const streamId = `__streaming_${sessionId}`;
     const msg: NormalizedMessage = {
       id: streamId,
@@ -827,14 +932,14 @@ export function useSessionStore() {
     }
     recomputeMergedIfNeeded(slot);
     notify(sessionId);
-  }, [getSlot, notify]);
+  }, [getSlot, notify, store]);
 
   /**
    * Finalize streaming: convert the streaming message to a regular text message.
    * The well-known streaming ID is replaced with a unique text message ID.
    */
   const finalizeStreaming = useCallback((sessionId: string) => {
-    const slot = storeRef.current.get(sessionId);
+    const slot = store.get(sessionId);
     if (!slot) return;
     const streamId = `__streaming_${sessionId}`;
     const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
@@ -848,25 +953,27 @@ export function useSessionStore() {
         role: 'assistant',
       };
       recomputeMergedIfNeeded(slot);
+      persistSlot(sessionId, slot);
       notify(sessionId);
     }
-  }, [notify]);
+  }, [notify, persistSlot, store]);
 
   /**
    * Get merged messages for a session (for rendering).
    */
   const getMessages = useCallback((sessionId: string): NormalizedMessage[] => {
-    return storeRef.current.get(sessionId)?.merged ?? EMPTY;
-  }, []);
+    return store.get(sessionId)?.merged ?? EMPTY;
+  }, [store]);
 
   /**
    * Get session slot (for status, pagination info, etc.).
    */
   const getSessionSlot = useCallback((sessionId: string): SessionSlot | undefined => {
-    return storeRef.current.get(sessionId);
-  }, []);
+    return store.get(sessionId);
+  }, [store]);
 
   return useMemo(() => ({
+    hydrateFromCache,
     fetchFromServer,
     fetchMore,
     appendRealtime,
@@ -879,7 +986,7 @@ export function useSessionStore() {
     getMessages,
     getSessionSlot,
   }), [
-    fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
+    hydrateFromCache, fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
     setActiveSession, isStale, updateStreaming, finalizeStreaming,
     getMessages, getSessionSlot,
   ]);

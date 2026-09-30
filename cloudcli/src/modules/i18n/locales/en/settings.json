@@ -68,11 +68,14 @@
   "quickSettings": {
     "title": "Quick Settings",
     "sections": {
+      "session": "Session",
       "appearance": "Appearance",
       "toolDisplay": "Tool Display",
       "inputSettings": "Input Settings"
     },
     "darkMode": "Dark Mode",
+    "tokenUsage": "Token usage",
+    "sendLater": "Send later",
     "showRawParameters": "Show raw parameters",
     "showThinking": "Show thinking",
     "sendByCtrlEnter": "Send by Ctrl+Enter",

@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 
 import { api } from '@/shared/api';
 import type { FileTreeNode,Project } from '@/shared/types';
+import { requestNativeDownload } from '@/shared/utils';
 
 // Invalid filename characters
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\x00-\x1f]/;
@@ -264,6 +265,10 @@ export function useFileTreeOperations({
   // Download a single file
   const downloadSingleFile = useCallback(async (item: FileTreeNode) => {
     if (!selectedProject) return;
+
+    if (requestNativeDownload(api.fileContentUrl(selectedProject.projectId, item.path), item.name)) {
+      return;
+    }
 
     // Use the binary streaming endpoint so downloads preserve raw bytes.
     const response = await api.readFileBlob(selectedProject.projectId, item.path);

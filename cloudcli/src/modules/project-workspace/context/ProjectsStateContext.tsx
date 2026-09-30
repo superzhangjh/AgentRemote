@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { useProjectsState } from '@/modules/project-workspace/hooks/useProjectsState';
-import type { IsSessionProcessing,ServerEvent } from '@/shared/types';
+import type { IsSessionProcessing, LLMProvider, ServerEvent } from '@/shared/types';
 
 type ProjectsState = ReturnType<typeof useProjectsState>;
 
@@ -45,6 +45,7 @@ type ProjectActiveSessionState = {
 type ProjectsStateProviderProps = {
   children: ReactNode;
   sessionId?: string;
+  sessionProvider?: LLMProvider;
   navigate: NavigateFunction;
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
   isMobile: boolean;
@@ -61,6 +62,7 @@ const ProjectActiveSessionContext = createContext<ProjectActiveSessionState | nu
 export function ProjectsStateProvider({
   children,
   sessionId,
+  sessionProvider,
   navigate,
   subscribe,
   isMobile,
@@ -68,6 +70,7 @@ export function ProjectsStateProvider({
 }: ProjectsStateProviderProps) {
   const state = useProjectsState({
     sessionId,
+    sessionProvider,
     navigate,
     subscribe,
     isMobile,

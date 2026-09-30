@@ -30,37 +30,46 @@ class MainFlutterWindow: NSWindow {
     }
 
     super.awakeFromNib()
-
-    if let closeButton = standardWindowButton(.closeButton) {
-      closeButton.target = self
-      closeButton.action = #selector(minimizeFromCloseButton(_:))
-    }
-  }
-
-  @objc private func minimizeFromCloseButton(_ sender: Any?) {
-    miniaturize(sender)
   }
 
   private func handleConsoleCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard call.method == "chooseCloudCliDirectory" else {
-      result(FlutterMethodNotImplemented)
-      return
-    }
-
     let arguments = call.arguments as? [String: Any]
-    let panel = NSOpenPanel()
-    panel.title = "选择 CloudCLI 项目目录"
-    panel.message = "请选择包含 package.json 和 server 目录的 cloudcli 文件夹。"
-    panel.prompt = "选择"
-    panel.canChooseFiles = false
-    panel.canChooseDirectories = true
-    panel.allowsMultipleSelection = false
-    if let initialPath = arguments?["initialPath"] as? String {
-      panel.directoryURL = URL(fileURLWithPath: initialPath, isDirectory: true)
-    }
 
-    panel.beginSheetModal(for: self) { response in
-      result(response == .OK ? panel.url?.path : nil)
+    switch call.method {
+    case "chooseCloudCliDirectory":
+      let panel = NSOpenPanel()
+      panel.title = "选择 CloudCLI 项目目录"
+      panel.message = "请选择包含 package.json 和 server 目录的 cloudcli 文件夹。"
+      panel.prompt = "选择"
+      panel.canChooseFiles = false
+      panel.canChooseDirectories = true
+      panel.allowsMultipleSelection = false
+      if let initialPath = arguments?["initialPath"] as? String {
+        panel.directoryURL = URL(fileURLWithPath: initialPath, isDirectory: true)
+      }
+
+      panel.beginSheetModal(for: self) { response in
+        result(response == .OK ? panel.url?.path : nil)
+      }
+
+    case "chooseRelayFile":
+      let panel = NSOpenPanel()
+      panel.title = "选择要中转的文件"
+      panel.message = "选择文件后会通过临时中转服务上传，并生成手机可打开的下载链接。"
+      panel.prompt = "选择"
+      panel.canChooseFiles = true
+      panel.canChooseDirectories = false
+      panel.allowsMultipleSelection = false
+      if let initialPath = arguments?["initialPath"] as? String {
+        panel.directoryURL = URL(fileURLWithPath: initialPath, isDirectory: true)
+      }
+
+      panel.beginSheetModal(for: self) { response in
+        result(response == .OK ? panel.url?.path : nil)
+      }
+
+    default:
+      result(FlutterMethodNotImplemented)
     }
   }
 

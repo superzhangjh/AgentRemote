@@ -96,6 +96,7 @@
           "src/shared/selectedProvider.ts",
           "src/shared/authToken.ts",
           "src/shared/voiceConfig.ts",
+          "src/shared/nativeVoice.ts",
           "src/shared/codeEditorSettings.ts",
           "src/shared/userSettings.ts",
           "src/shared/chatDrafts.ts",

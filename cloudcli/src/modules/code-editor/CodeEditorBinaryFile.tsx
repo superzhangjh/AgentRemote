@@ -6,9 +6,24 @@ type CodeEditorBinaryFileProps = {
   isFullscreen: boolean;
   onClose: () => void;
   onToggleFullscreen: () => void;
+  onDownload?: () => void;
   title: string;
   message: string;
+  downloadLabel?: string;
 };
+
+function formatByteSize(bytes?: number): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const rounded = value >= 10 || unitIndex === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded} ${units[unitIndex]}`;
+}
 
 /** Rendered by CodeEditor inside the code-editor module when the opened file is binary and cannot be edited as text. */
 export default function CodeEditorBinaryFile({
@@ -17,9 +32,13 @@ export default function CodeEditorBinaryFile({
   isFullscreen,
   onClose,
   onToggleFullscreen,
+  onDownload,
   title,
   message,
+  downloadLabel = 'Download',
 }: CodeEditorBinaryFileProps) {
+  const size = formatByteSize(file.size);
+
   const binaryContent = (
     <div className="flex h-full w-full flex-col items-center justify-center bg-background p-8 text-muted-foreground">
       <div className="flex max-w-md flex-col items-center gap-4 text-center">
@@ -31,13 +50,28 @@ export default function CodeEditorBinaryFile({
         <div>
           <h3 className="mb-2 text-lg font-medium text-foreground">{title}</h3>
           <p className="text-sm text-muted-foreground">{message}</p>
+          {size && (
+            <p className="mt-2 text-sm tabular-nums text-muted-foreground">
+              {file.name} · {size}
+            </p>
+          )}
         </div>
-        <button
-          onClick={onClose}
-          className="mt-4 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90"
-        >
-          Close
-        </button>
+        <div className="mt-4 flex items-center gap-2">
+          {onDownload && (
+            <button
+              onClick={onDownload}
+              className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              {downloadLabel}
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="rounded-md border border-border px-4 py-2 text-sm text-foreground transition-colors hover:bg-accent"
+          >
+            Close
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -14,7 +14,8 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
-import type { QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { QueuedDraft, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import { hasNativeVoice } from '@/shared/nativeVoice';
 import {
   PromptInput,
   PromptInputHeader,
@@ -30,10 +31,7 @@ import ActivityIndicator from '@/modules/chat/composer/ActivityIndicator';
 import ComposerAttachment from '@/modules/chat/composer/ComposerAttachment';
 import VoiceInputButton from '@/modules/chat/composer/VoiceInputButton';
 import PermissionRequestsBanner from '@/modules/chat/composer/PermissionRequestsBanner';
-import TokenUsageSummary from '@/modules/chat/composer/TokenUsageSummary';
 import QueuedMessageCard from '@/modules/chat/composer/QueuedMessageCard';
-import { ScheduleMessagePopover } from '@/modules/chat/composer/ScheduleMessagePopover';
-import { ScheduledMessageList } from '@/modules/chat/composer/ScheduledMessageList';
 import ComposerModelMenu from '@/modules/chat/composer/ComposerModelMenu';
 import ComposerPermissionMenu from '@/modules/chat/composer/ComposerPermissionMenu';
 
@@ -63,8 +61,8 @@ type ChatComposerProps = {
   availableModelOptions: ProviderModelOption[];
   onSelectModel: (model: string) => void;
   modelsLoading: boolean;
-  tokenBudget: Record<string, unknown> | null;
-  onShowTokenUsage: () => void;
+  fastMode?: boolean;
+  onToggleFastMode?: () => void;
   slashCommandsCount: number;
   onToggleCommandMenu: () => void;
   hasInput: boolean;
@@ -75,10 +73,6 @@ type ChatComposerProps = {
   /** Set while the composer is replacing an already-sent message. */
   isEditingSentMessage: boolean;
   onCancelEditMessage: () => void;
-  /** Messages waiting to be sent to this session later. */
-  scheduledMessages: ScheduledMessage[];
-  onScheduleMessage: (scheduledFor: Date) => void;
-  onCancelScheduledMessage: (id: string) => void;
   onEditQueuedDraft: () => void;
   onDeleteQueuedDraft: () => void;
   attachedFiles: File[];
@@ -138,8 +132,8 @@ export default function ChatComposer({
   availableModelOptions,
   onSelectModel,
   modelsLoading,
-  tokenBudget,
-  onShowTokenUsage,
+  fastMode,
+  onToggleFastMode,
   slashCommandsCount,
   onToggleCommandMenu,
   hasInput,
@@ -149,9 +143,6 @@ export default function ChatComposer({
   queuedDraft,
   isEditingSentMessage,
   onCancelEditMessage,
-  scheduledMessages,
-  onScheduleMessage,
-  onCancelScheduledMessage,
   onEditQueuedDraft,
   onDeleteQueuedDraft,
   attachedFiles,
@@ -223,7 +214,8 @@ export default function ChatComposer({
 
   // Voice state is hosted here (not in the mic button) so the main Send button can stop
   // recording and send the transcript in one tap, the way the mic button drops it in the box.
-  const voiceAvailable = useVoiceAvailable();
+  // The mic shows for the Android shell's on-device recognizer even with no voice backend.
+  const voiceAvailable = useVoiceAvailable() || hasNativeVoice();
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const voiceErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleVoiceError = useCallback((msg: string) => {
@@ -285,11 +277,6 @@ export default function ChatComposer({
           />
         </div>
       )}
-
-      <ScheduledMessageList
-        scheduledMessages={scheduledMessages}
-        onCancel={onCancelScheduledMessage}
-      />
 
       {isEditingSentMessage && (
         <div className="mx-auto mb-2 flex max-w-[54.25rem] items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-foreground">
@@ -443,8 +430,6 @@ export default function ChatComposer({
               <VoiceInputButton state={voiceState} onToggle={voiceToggle} errorMsg={voiceError} />
             )}
 
-            <TokenUsageSummary usage={tokenBudget} onClick={onShowTokenUsage} />
-
             <PromptInputButton
               tooltip={{ content: t('input.showAllCommands') }}
               onClick={onToggleCommandMenu}
@@ -473,11 +458,6 @@ export default function ChatComposer({
           </PromptInputTools>
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
-            <ScheduleMessagePopover
-              disabled={!input.trim()}
-              onSchedule={onScheduleMessage}
-            />
-
             <ComposerModelMenu
               effort={effort}
               effortOptions={availableEffortOptions}
@@ -486,6 +466,8 @@ export default function ChatComposer({
               modelOptions={availableModelOptions}
               onSelectModel={onSelectModel}
               modelsLoading={modelsLoading}
+              fastMode={fastMode}
+              onToggleFastMode={onToggleFastMode}
             />
 
             <ComposerPermissionMenu

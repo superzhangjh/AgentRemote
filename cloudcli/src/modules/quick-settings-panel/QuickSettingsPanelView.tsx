@@ -76,6 +76,7 @@ function QuickSettingsPanelView() {
             isDarkMode={isDarkMode}
             preferences={quickSettingsPreferences}
             onPreferenceChange={handlePreferenceChange}
+            onRequestClose={() => setIsOpen(false)}
           />
         </div>
       </div>

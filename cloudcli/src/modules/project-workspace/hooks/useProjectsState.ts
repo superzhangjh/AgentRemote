@@ -9,11 +9,13 @@ import type { ServerEvent,
   Project,
   ProjectSession,IsSessionProcessing } from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
+import { readCachedProjects, writeCachedProjects } from '@/modules/project-workspace/utils/projectsLocalCache';
 import { readSelectedProvider } from '@/shared/selectedProvider';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 
 type UseProjectsStateArgs = {
   sessionId?: string;
+  sessionProvider?: LLMProvider;
   navigate: NavigateFunction;
   /** Subscription to the unified websocket event stream. */
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
@@ -367,13 +369,19 @@ const readPersistedTab = (): AppTab => {
 
 export function useProjectsState({
   sessionId,
+  sessionProvider,
   navigate,
   subscribe,
   isMobile,
   isSessionProcessing,
 }: UseProjectsStateArgs) {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [listProvider, setListProvider] = useState(readSelectedProvider);
+  // Seeded from the localStorage snapshot so a slow connection paints the
+  // sidebar immediately; the network fetch below replaces it with fresh data.
+  const [projects, setProjects] = useState<Project[]>(() => readCachedProjects(sessionProvider ?? readSelectedProvider()));
+  const [listProvider, setListProvider] = useState(() => sessionProvider ?? readSelectedProvider());
+  // The socket listener stays mounted while this changes, so it reads the current provider through this ref.
+  const listProviderRef = useRef(listProvider);
+  listProviderRef.current = listProvider;
   const fetchedProviderRef = useRef(listProvider);
   const requestedProviderRef = useRef(listProvider);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -390,7 +398,7 @@ export function useProjectsState({
   }, [activeTab]);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(projects.length === 0);
   const [loadingProgress, setLoadingProgress] = useState<LoadingProgress | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState('agents');
@@ -444,7 +452,10 @@ export function useProjectsState({
   projectsRef.current = projects;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
-  /** URL session id whose backend lookup already ran (or is in flight) — one attempt per id. */
+  // Reject a lookup started for another provider even when the URL id matches.
+  const sessionProviderRef = useRef(sessionProvider);
+  sessionProviderRef.current = sessionProvider;
+  /** URL id already looked up, or awaiting an announced canonical-id navigation. */
   const sessionLookupRef = useRef<string | null>(null);
   /**
    * Generation of the newest `/api/projects` request. Several independent
@@ -457,12 +468,37 @@ export function useProjectsState({
   const projectsRequestIdRef = useRef(0);
 
   useEffect(() => subscribeToUserPreferences(() => {
-    setListProvider(readSelectedProvider());
-  }), []);
+    const nextProvider = readSelectedProvider();
+    if (listProviderRef.current === nextProvider) {
+      return;
+    }
+
+    listProviderRef.current = nextProvider;
+    setListProvider(nextProvider);
+    // Change the list in the same render as its provider. The persistence
+    // effect must never write the previous agent's rows under the new key.
+    const cachedProjects = readCachedProjects(nextProvider);
+    setProjects(cachedProjects);
+    setIsLoadingProjects(cachedProjects.length === 0);
+
+    const activeSession = selectedSessionRef.current
+      ?? projectsRef.current
+        .flatMap((project) => project.sessions ?? [])
+        .find((session) => session.id === sessionIdRef.current)
+      ?? null;
+    const activeSessionProvider = activeSession ? getSessionProvider(activeSession) : null;
+    const routeParams = new URLSearchParams(window.location.search);
+    const notificationTarget = routeParams.get('notificationProvider') ?? routeParams.get('provider');
+    if ((activeSession || sessionIdRef.current) && activeSessionProvider !== nextProvider && notificationTarget !== nextProvider) {
+      // Sessions belong to one provider, so switching agents leaves the old conversation before a new send.
+      setSelectedSession(null);
+      navigate('/');
+    }
+  }), [navigate]);
 
   useEffect(() => {
     sessionLookupRef.current = null;
-  }, [sessionId]);
+  }, [sessionId, sessionProvider]);
 
   const markSessionAttention = useCallback((targetSessionId?: string | null) => {
     if (!targetSessionId) {
@@ -514,9 +550,12 @@ export function useProjectsState({
       const response = await api.projects(listProvider);
       const projectData = (await response.json()) as Project[];
 
-      if (projectsRequestIdRef.current !== requestId) {
+      if (projectsRequestIdRef.current !== requestId || listProviderRef.current !== listProvider) {
         return;
       }
+
+      // Refresh the persisted snapshot so the next cold start can paint from it.
+      writeCachedProjects(listProvider, projectData);
 
       const providerChanged = fetchedProviderRef.current !== listProvider;
       fetchedProviderRef.current = listProvider;
@@ -575,13 +614,74 @@ export function useProjectsState({
   useEffect(() => {
     if (requestedProviderRef.current === listProvider) return;
     requestedProviderRef.current = listProvider;
-    void fetchProjects();
+    // Paint the newly selected provider's cached list immediately; the fetch
+    // reconciles it and the `providerChanged` branch replaces it wholesale.
+    setProjects(readCachedProjects(listProvider));
+    void fetchProjects({ showLoadingState: projectsRef.current.length === 0 });
   }, [fetchProjects, listProvider]);
+
+  // Mirror every sidebar mutation into the persisted snapshot, not just the
+  // `/api/projects` response: optimistic registrations, loaded session pages,
+  // and — critically — session/project deletions all change `projects` locally,
+  // and without this the next cold start would serve the deleted rows from the
+  // stale cache. Capture the provider of this render, so an outgoing effect
+  // cannot write its snapshot under the next agent's key.
+  useEffect(() => {
+    writeCachedProjects(listProvider, projects);
+  }, [listProvider, projects]);
 
   const refreshProjectsSilently = useCallback(async () => {
     // Keep chat view stable while still syncing sidebar/session metadata in background.
     await fetchProjects({ showLoadingState: false });
   }, [fetchProjects]);
+
+  /**
+   * Reconcile the sidebar after the app is resumed.
+   *
+   * The socket keeps the list current while the page is alive, but a mobile
+   * shell backgrounds the WebView without unmounting React, and events missed
+   * while it was hidden are never replayed. Re-fetch the full list silently so
+   * an app switch does not force a manual refresh; the response is merged into
+   * the existing list (loaded pages are preserved) rather than replacing it.
+   *
+   * `agentremote:resume` is dispatched by the Android shell, which cannot rely
+   * on the WebView's own `visibilitychange` firing on every resume.
+   */
+  const lastResumeRefreshAtRef = useRef(0);
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return undefined;
+    }
+
+    // Seed the throttle so the focus that follows the initial mount fetch does
+    // not immediately trigger a second one.
+    lastResumeRefreshAtRef.current = Date.now();
+
+    const handleResume = () => {
+      // `visibilitychange` also fires on hide; only the visible transition
+      // should reconcile. The shell's `agentremote:resume` only fires on resume.
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+
+      // The shell event and the browser's focus usually arrive together; drop
+      // the duplicate so one resume costs one `/api/projects` scan.
+      const now = Date.now();
+      if (now - lastResumeRefreshAtRef.current < 2_000) {
+        return;
+      }
+      lastResumeRefreshAtRef.current = now;
+      void refreshProjectsSilently();
+    };
+
+    document.addEventListener('visibilitychange', handleResume);
+    window.addEventListener('agentremote:resume', handleResume);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleResume);
+      window.removeEventListener('agentremote:resume', handleResume);
+    };
+  }, [refreshProjectsSilently]);
 
   const registerOptimisticSession = useCallback(({
     sessionId: newSessionId,
@@ -701,7 +801,7 @@ export function useProjectsState({
     }
 
     mountFetchStartedRef.current = true;
-    void fetchProjects();
+    void fetchProjects({ showLoadingState: projectsRef.current.length === 0 });
   }, [fetchProjects]);
 
   useEffect(() => {
@@ -779,6 +879,9 @@ export function useProjectsState({
 
       const upsert = event as SessionUpsertedEvent;
       if (!upsert.sessionId || !upsert.session) {
+        return;
+      }
+      if (upsert.provider !== listProviderRef.current) {
         return;
       }
 
@@ -872,12 +975,14 @@ export function useProjectsState({
       });
 
       if (sessionId === aliasedSelectedSessionId) {
-        navigate(`/session/${upsert.sessionId}`);
+        sessionLookupRef.current = aliasedSelectedSessionId;
+        const providerQuery = sessionProvider ? `?provider=${encodeURIComponent(sessionProvider)}` : '';
+        navigate(`/session/${upsert.sessionId}${providerQuery}`);
       }
     };
 
     return subscribe(handleEvent);
-  }, [isSessionProcessing, markSessionAttention, navigate, refreshProjectsSilently, sessionId, subscribe]);
+  }, [isSessionProcessing, markSessionAttention, navigate, refreshProjectsSilently, sessionId, sessionProvider, subscribe]);
 
   useEffect(() => {
     return () => {
@@ -899,7 +1004,8 @@ export function useProjectsState({
 
     // Project membership is resolved through `projectId` after the migration.
     for (const project of projects) {
-      const match = project.sessions?.find((session) => session.id === sessionId);
+      const match = project.sessions?.find((session) => session.id === sessionId &&
+        (!sessionProvider || getSessionProvider(session) === sessionProvider));
       if (match) {
         const normalizedSession = normalizeSessionProvider(match);
         const shouldUpdateProject = selectedProject?.projectId !== project.projectId;
@@ -916,7 +1022,7 @@ export function useProjectsState({
       }
     }
 
-    if (selectedSession?.id === sessionId) {
+    if (selectedSession?.id === sessionId && (!sessionProvider || getSessionProvider(selectedSession) === sessionProvider)) {
       return;
     }
 
@@ -930,11 +1036,15 @@ export function useProjectsState({
       return;
     }
     sessionLookupRef.current = sessionId;
+    // A deep link must not keep the previous conversation sendable while its
+    // owning project is being resolved. Failed lookups stay unselected.
+    setSelectedSession(null);
+    setSelectedProject(null);
 
     void (async () => {
       let details: SessionDetailsApiPayload['data'] | null = null;
       try {
-        const response = await api.sessionDetails(sessionId);
+        const response = await api.sessionDetails(sessionId, sessionProvider);
         if (response.ok) {
           const payload = (await response.json()) as SessionDetailsApiPayload;
           details = payload.data ?? null;
@@ -944,33 +1054,17 @@ export function useProjectsState({
       }
 
       // The user navigated elsewhere while the lookup was in flight.
-      if (sessionIdRef.current !== sessionId) {
+      if (sessionIdRef.current !== sessionId || sessionProviderRef.current !== sessionProvider) {
         return;
       }
 
-      if (!details) {
-        // Unknown session id (or lookup failed). Fall back to the legacy
-        // behavior: host a placeholder under the currently selected project so
-        // chat state stays alive (without a `selectedSession`, chat clears
-        // `currentSessionId` and stops reading the session store).
-        const fallbackProject = selectedProjectRef.current;
-        if (!fallbackProject || selectedSessionRef.current?.id === sessionId) {
-          return;
-        }
-
-        setSelectedSession({
-          id: sessionId,
-          __provider: readSelectedProvider(),
-          __projectId: fallbackProject.projectId,
-          summary: '',
-        });
-        return;
-      }
+      if (!details) return;
 
       // The URL carried a provider-native alias id: swap it for the canonical
       // app-facing id and let this effect re-run against the new URL.
       if (typeof details.sessionId === 'string' && details.sessionId && details.sessionId !== sessionId) {
-        navigate(`/session/${details.sessionId}`, { replace: true });
+        const providerQuery = sessionProvider ? `?provider=${encodeURIComponent(sessionProvider)}` : '';
+        navigate(`/session/${details.sessionId}${providerQuery}`, { replace: true });
         return;
       }
 
@@ -1020,7 +1114,7 @@ export function useProjectsState({
           : resolvedSession,
       );
     })();
-  }, [navigate, sessionId, projects, selectedProject, selectedSession?.id, selectedSession?.__provider]);
+  }, [navigate, sessionId, sessionProvider, projects, selectedProject, selectedSession?.id, selectedSession?.__provider]);
 
   const handleProjectSelect = useCallback(
     (project: Project) => {
@@ -1098,7 +1192,7 @@ export function useProjectsState({
     try {
       const response = await api.projects(listProvider);
       const freshProjects = (await response.json()) as Project[];
-      if (requestId !== projectsRequestIdRef.current) return;
+      if (requestId !== projectsRequestIdRef.current || listProviderRef.current !== listProvider) return;
       const providerChanged = fetchedProviderRef.current !== listProvider;
       fetchedProviderRef.current = listProvider;
       const projectsWithTaskMaster = providerChanged

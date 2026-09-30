@@ -24,7 +24,9 @@ import ImageViewer from '@/modules/file-tree/ImageViewer';
 
 type FileTreeProps = {
   selectedProject: Project | null;
-  onFileOpen?: (filePath: string) => void;
+  // The tree knows each entry's byte size, so it hands it to the editor; the
+  // binary/large-file panel shows it without an extra fetch.
+  onFileOpen?: (filePath: string, diffInfo?: any, size?: number) => void;
 };
 
 /** Exported through the file-tree barrel; the project-workspace module renders it as the Files sidebar tab. */
@@ -135,7 +137,7 @@ export default function FileTree({ selectedProject, onFileOpen }: FileTreeProps)
         return;
       }
 
-      onFileOpen?.(item.path);
+      onFileOpen?.(item.path, undefined, item.size);
     },
     [onFileOpen, selectedProject, toggleDirectory],
   );

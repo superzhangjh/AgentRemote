@@ -98,7 +98,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsImages: true,
     supportsFiles: true,
     supportsAbort: true,
-    supportsPermissionRequests: false,
+    // The bridge surfaces approvals raised on the shared OpenCode server and
+    // posts decisions back through the SDK (see the OpenCode permission gateway).
+    supportsPermissionRequests: true,
     supportsTokenUsage: true,
     supportsEffort: true,
     supportsMessageEditing: false,

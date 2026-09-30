@@ -1,6 +1,7 @@
 import { memo } from 'react';
 
 import { QuickSettingsPanel } from '@/modules/quick-settings-panel';
+import { ComposerToolsProvider } from '@/modules/chat';
 import ProjectEffects from '@/modules/project-workspace/controllers/ProjectEffects';
 import type { ProjectWorkspaceShellProps } from '@/shared/types';
 import ProjectCommandPalette from '@/modules/project-workspace/ProjectCommandPalette';
@@ -19,20 +20,22 @@ function ProjectWorkspaceShell({
       className="fixed inset-0 flex bg-background"
       style={{ bottom: 'var(--keyboard-height, 0px)' }}
     >
-      <ProjectEffects navigate={navigate} />
-      <ProjectSidebarRegion isMobile={isMobile} />
+      <ComposerToolsProvider>
+        <ProjectEffects navigate={navigate} />
+        <ProjectSidebarRegion isMobile={isMobile} />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <ProjectMainRegion
-          isMobile={isMobile}
-          ws={ws}
-          sendMessage={sendMessage}
-          navigate={navigate}
-        />
-      </div>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <ProjectMainRegion
+            isMobile={isMobile}
+            ws={ws}
+            sendMessage={sendMessage}
+            navigate={navigate}
+          />
+        </div>
 
-      <ProjectCommandPalette />
-      <QuickSettingsPanel />
+        <ProjectCommandPalette />
+        <QuickSettingsPanel />
+      </ComposerToolsProvider>
     </div>
   );
 }

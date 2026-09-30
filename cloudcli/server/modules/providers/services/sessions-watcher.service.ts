@@ -50,9 +50,7 @@ type PendingWatcherUpdate = {
   providers: Set<LLMProvider>;
   changeTypes: Set<WatcherEventType>;
   /**
-   * Provider-native session ids reported by the synchronizers. They are
-   * translated back to app-facing session rows at flush time, because the
-   * transcript file names on disk only ever contain provider ids.
+   * App-facing ids returned by synchronizers after indexing their native ids.
    */
   updatedSessionIds: Set<string>;
 };

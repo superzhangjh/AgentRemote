@@ -28,6 +28,23 @@ type SynchronizeRowsResult = {
   firstSessionId: string | null;
 };
 
+const OPENCODE_FALLBACK_TITLE = 'Untitled OpenCode Session';
+
+/**
+ * OpenCode seeds every new session with the placeholder title
+ * `New session - <ISO timestamp>` until the first turn finishes and it writes a
+ * real title. A stored placeholder (or a missing/fallback title) must not
+ * outrank the title OpenCode later generates, or the sidebar keeps showing the
+ * creation timestamp forever.
+ */
+function isPlaceholderSessionTitle(title: string | null | undefined): boolean {
+  if (!title || title === OPENCODE_FALLBACK_TITLE) {
+    return true;
+  }
+
+  return /^New session\b/.test(title.trim());
+}
+
 /**
  * Session indexer for OpenCode's SQLite-backed session store.
  */
@@ -65,6 +82,12 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       const sinceMillis = since?.getTime() ?? null;
       const limitClause = limit ? 'LIMIT ?' : '';
       const params = limit ? [sinceMillis, sinceMillis, limit] : [sinceMillis, sinceMillis];
+      // Subagent runs create child sessions (`parent_id` set) in the same
+      // database. They are internal task branches, not conversations the user
+      // started, so indexing them adds phantom sidebar entries that look like
+      // duplicate sessions. The column only exists on newer OpenCode layouts,
+      // so the filter is applied only when the database exposes it.
+      const parentFilter = this.hasParentIdColumn(db) ? 'AND s.parent_id IS NULL' : '';
       const rows = db.prepare(`
         SELECT
           s.id AS id,
@@ -76,6 +99,7 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
         FROM session s
         LEFT JOIN project p ON p.id = s.project_id
         WHERE s.time_archived IS NULL
+          ${parentFilter}
           AND (? IS NULL OR COALESCE(s.time_updated, s.time_created, 0) >= ?)
         ORDER BY COALESCE(s.time_updated, s.time_created, 0) DESC, s.id DESC
         ${limitClause}
@@ -105,6 +129,18 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
     }
   }
 
+  /**
+   * Reports whether the OpenCode session table exposes `parent_id`.
+   *
+   * Child sessions only exist on layouts new enough to record the parent
+   * relationship; on older databases the column is absent and filtering on it
+   * would fail the whole scan.
+   */
+  private hasParentIdColumn(db: Database.Database): boolean {
+    const columns = db.prepare('PRAGMA table_info(session)').all() as { name: string }[];
+    return columns.some((column) => column.name === 'parent_id');
+  }
+
   private upsertSession(db: Database.Database, row: OpenCodeSessionRow): string | null {
     const sessionId = readOptionalString(row.id);
     const projectPath = readOptionalString(row.directory) ?? readOptionalString(row.worktree);
@@ -112,9 +148,8 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       return null;
     }
 
-    const fallbackTitle = 'Untitled OpenCode Session';
-    const pendingAppSession = sessionsDb.getSessionByProviderSessionId(sessionId)
-      ?? sessionsDb.getSessionById(sessionId)
+    const pendingAppSession = sessionsDb.getSessionByProviderSessionId(sessionId, this.provider)
+      ?? sessionsDb.getSessionById(sessionId, this.provider)
       ?? sessionsDb.findLatestPendingAppSession(this.provider, projectPath);
     if (pendingAppSession && !pendingAppSession.provider_session_id) {
       // Slow networks can let the sqlite watcher index opencode.db before the
@@ -126,15 +161,21 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
 
     // App-created sessions are keyed by an app id, so disk-discovered provider
     // ids must be resolved through the provider-id mapping first.
-    const existingSession = sessionsDb.getSessionByProviderSessionId(sessionId)
-      ?? sessionsDb.getSessionById(sessionId);
+    const existingSession = sessionsDb.getSessionByProviderSessionId(sessionId, this.provider)
+      ?? sessionsDb.getSessionById(sessionId, this.provider);
     const existingName = existingSession?.custom_name;
+    const providerTitle = readOptionalString(row.title);
 
     let nextName: string | undefined;
-    if (existingName && existingName !== fallbackTitle) {
+    if (existingName && !isPlaceholderSessionTitle(existingName)) {
+      // A real CloudCLI/user title already exists; never overwrite it.
       nextName = existingName;
+    } else if (providerTitle && !isPlaceholderSessionTitle(providerTitle)) {
+      // The placeholder indexed at creation time is now superseded by the
+      // title OpenCode generated once the first turn completed.
+      nextName = providerTitle;
     } else {
-      nextName = readOptionalString(row.title) ?? this.readFirstUserText(db, sessionId);
+      nextName = existingName ?? providerTitle ?? this.readFirstUserText(db, sessionId);
     }
 
     // OpenCode stores every session in one shared sqlite database, so jsonl_path
@@ -145,7 +186,7 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       sessionId,
       this.provider,
       projectPath,
-      normalizeSessionName(nextName, fallbackTitle),
+      normalizeSessionName(nextName, OPENCODE_FALLBACK_TITLE),
       normalizeProviderTimestamp(row.time_created),
       normalizeProviderTimestamp(row.time_updated ?? row.time_created),
       null,

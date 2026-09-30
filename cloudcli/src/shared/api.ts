@@ -149,6 +149,9 @@ export const sessionMessagesUrl = (
 const fileContentPath = (projectId: string, filePath: string) =>
   `/api/file-tree/projects/${projectId}/files/content${query({ path: filePath })}`;
 
+const assetFilePath = (storedName: string) =>
+  `/api/assets/files/${encodeURIComponent(storedName)}`;
+
 const pluginAssetPath = (pluginName: string, assetFile: string) =>
   `/api/plugins/${encodeURIComponent(pluginName)}/assets/${encodeURIComponent(assetFile)}`;
 
@@ -224,9 +227,10 @@ export const api = {
   getArchivedSessions: () => get('/api/providers/sessions/archived'),
   // Resolves one session (by app id or provider-native id) to its metadata and
   // owning project — used when a /session/<id> URL isn't in loaded payloads.
-  sessionDetails: (sessionId: string) =>
-    get(`/api/providers/sessions/${encodeURIComponent(sessionId)}`),
-  runningSessions: () => get('/api/providers/sessions/running'),
+  sessionDetails: (sessionId: string, provider?: string) =>
+    get(`/api/providers/sessions/${encodeURIComponent(sessionId)}${query({ provider })}`),
+  runningSessions: (sessionId?: string) =>
+    get(`/api/providers/sessions/running${query({ sessionId })}`),
   recentConversations: ({ limit = 40, offset = 0, provider }: { limit?: number; offset?: number; provider?: string } = {}) =>
     get(`/api/providers/sessions/recent${query({ limit, offset, provider })}`),
   providerSessionId: (sessionId: string) =>
@@ -253,6 +257,7 @@ export const api = {
     get(`/api/file-tree/projects/${projectId}/file${query({ filePath })}`),
   // Raw bytes for a workspace file. The endpoint requires the auth header, so
   // media call sites fetch a blob through here instead of using a bare `src`.
+  fileContentUrl: fileContentPath,
   readFileBlob: (projectId: string, filePath: string, options: ApiRequestOptions = {}) =>
     get(fileContentPath(projectId, filePath), options),
   saveFile: (projectId: string, filePath: string, content: string) =>
@@ -425,7 +430,8 @@ export const api = {
         headers: {}, // Let browser set Content-Type for FormData
         body: formData,
       }),
-    file: (storedName: string) => get(`/api/assets/files/${encodeURIComponent(storedName)}`),
+    fileUrl: assetFilePath,
+    file: (storedName: string) => get(assetFilePath(storedName)),
     image: (filename: string, options: ApiRequestOptions = {}) =>
       get(`/api/assets/images/${encodeURIComponent(filename)}`, options),
   },

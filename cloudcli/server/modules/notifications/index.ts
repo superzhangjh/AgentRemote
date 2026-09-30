@@ -11,6 +11,10 @@ export {
   notifyRunStopped,
   // Used by provider runtimes to report background work that finished after its turn ended.
   notifyBackgroundWorkCompleted,
+  // Used by the OpenCode bridge to report approvals and questions raised by an
+  // external OpenCode server.
+  notifyPermissionRequired,
+  notifyQuestionRequired,
 } from '@/modules/notifications/services/notification-orchestrator.service.js';
 export {
   registerDesktopNotificationClient,

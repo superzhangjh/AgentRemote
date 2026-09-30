@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import express from 'express';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
@@ -132,8 +134,29 @@ export function createFileTreeRouter(
 
   router.get('/projects/:projectId/files/content', createRouteHandler(async (request, response) => {
     const filePath = readRequiredString(request.query.path, 'path', 'Invalid file path');
-    const file = await services.openFile(readProjectId(request), filePath);
+    const file = await services.openFile(
+      readProjectId(request),
+      filePath,
+      typeof request.headers.range === 'string' ? request.headers.range : null,
+    );
+
+    // Content-Length is what lets the Android DownloadManager (and every
+    // browser) render a real percentage and allow resuming; without it the
+    // transfer is indeterminate. Range support keeps resumable downloads and
+    // large media previews working over the tunnel.
+    const contentLength = Math.max(0, file.end - file.start + 1);
+    const fileName = path.basename(filePath) || 'file';
     response.setHeader('Content-Type', file.contentType);
+    response.setHeader('Accept-Ranges', 'bytes');
+    response.setHeader('Content-Length', String(contentLength));
+    response.setHeader(
+      'Content-Disposition',
+      `${request.query.download === '1' ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    );
+    if (file.partial) {
+      response.status(206);
+      response.setHeader('Content-Range', `bytes ${file.start}-${file.end}/${file.size}`);
+    }
     file.stream.pipe(response);
     file.stream.on('error', (error) => {
       logger.error('Error streaming File Tree content', error);

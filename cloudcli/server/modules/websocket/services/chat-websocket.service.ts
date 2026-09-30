@@ -5,6 +5,7 @@ import type { WebSocket } from 'ws';
 import { sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService, sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
+import { isExternalSessionBusy, listExternalBusySessions } from '@/modules/websocket/services/external-session-activity.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
 import {
   getGlobalImageAssetsDir,
@@ -438,18 +439,18 @@ async function handleChatAbort(
 }
 
 /**
- * Handles `chat.subscribe`: for each requested session, reports whether a run
- * is processing, re-attaches the live stream to this socket, replays missed
- * events (seq > lastSeq), and includes pending permission requests.
+ * Handles `chat.subscribe`: for each requested session, reports activity,
+ * re-attaches CloudCLI-owned live streams, replays missed events, and includes
+ * pending permission requests. Native Codex runs provide status only.
  *
  * This single message replaces the old `check-session-status`,
  * `get-pending-permissions`, and Claude-only writer reconnect flows.
  */
-function handleChatSubscribe(
+async function handleChatSubscribe(
   ws: WebSocket,
   data: AnyRecord,
   dependencies: ChatWebSocketDependencies
-): void {
+): Promise<void> {
   const targets = Array.isArray(data.sessions) ? data.sessions : [];
 
   for (const target of targets) {
@@ -470,22 +471,35 @@ function handleChatSubscribe(
       : 0;
 
     const run = chatRunRegistry.getRun(sessionId);
-    const isProcessing = chatRunRegistry.isProcessing(sessionId);
+    const isCloudCliProcessing = chatRunRegistry.isProcessing(sessionId);
+    const isExternalOpenCodeProcessing = !isCloudCliProcessing && isExternalSessionBusy(sessionId);
+    const isNativeCodexProcessing = !isCloudCliProcessing
+      && !isExternalOpenCodeProcessing
+      && await sessionsService.isExternalCodexSessionRunning(sessionId);
+    const pendingPermissions = dependencies.runtime.getPendingApprovalsForSession(sessionId);
+    const isProcessing = isCloudCliProcessing || isExternalOpenCodeProcessing || isNativeCodexProcessing || pendingPermissions.length > 0;
+    const externalActivity = isExternalOpenCodeProcessing
+      ? listExternalBusySessions().find((session) => session.sessionId === sessionId) : undefined;
+    // A native Codex process owns its own app-server turn, so its approval
+    // requests never reach this connection. Label it plainly instead of leaving
+    // the phone on an unlabelled spinner that looks like a stalled queue.
+    const statusText = isCloudCliProcessing ? run?.notificationDetail
+      : isNativeCodexProcessing ? '外部运行中'
+        : externalActivity?.statusText ?? (pendingPermissions.length > 0 ? '等待审批' : null);
 
     // Future live events for this run should land on the socket that asked —
     // this is what makes mid-stream page refreshes work for all providers.
-    if (isProcessing) {
+    if (isCloudCliProcessing) {
       chatRunRegistry.attachConnection(sessionId, ws);
     }
-
-    // Pending approvals are tracked under the app session id inside the
-    // Claude runtime, so they can be looked up directly.
-    const pendingPermissions = dependencies.runtime.getPendingApprovalsForSession(sessionId);
 
     sendJson(ws, {
       kind: 'chat_subscribed',
       sessionId,
+      provider: run?.provider ?? externalActivity?.provider ?? sessionsDb.getSessionById(sessionId)?.provider,
       isProcessing,
+      statusText,
+      canInterrupt: isCloudCliProcessing,
       lastSeq: run?.lastSeq ?? 0,
       pendingPermissions,
       timestamp: new Date().toISOString(),
@@ -495,7 +509,7 @@ function handleChatSubscribe(
     // are fully persisted to the provider transcript and served over REST —
     // replaying them (e.g. after a page reload where the client's lastSeq is
     // 0) would duplicate messages the history fetch already returned.
-    if (isProcessing) {
+    if (isCloudCliProcessing) {
       for (const event of chatRunRegistry.replayEvents(sessionId, lastSeq)) {
         sendJson(ws, event);
       }
@@ -505,8 +519,7 @@ function handleChatSubscribe(
 
 /**
  * Handles `chat.permission-response`: forwards a tool-approval decision to the
- * pending approval resolver (Claude is the only provider with interactive
- * approvals today, but the message is intentionally provider-neutral).
+ * pending approval resolver shared by Claude, Codex and the OpenCode bridge.
  */
 function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDependencies): void {
   if (typeof data.requestId !== 'string' || data.requestId.length === 0) {
@@ -631,7 +644,7 @@ export function handleChatConnection(
           await handleChatAbort(ws, data, dependencies);
           return;
         case 'chat.subscribe':
-          handleChatSubscribe(ws, data, dependencies);
+          await handleChatSubscribe(ws, data, dependencies);
           return;
         case 'chat.permission-response':
           handlePermissionResponse(data, dependencies);

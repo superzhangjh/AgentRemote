@@ -127,9 +127,13 @@ export function useChatRealtimeHandlers({
           // Ack for chat.subscribe: authoritative processing state plus any
           // pending tool-permission prompts for the run.
           if (!sid) return;
+          if (sid === activeViewSessionId && msg.provider && msg.provider !== provider) return;
 
           if (msg.isProcessing) {
-            onSessionProcessing?.(sid);
+            onSessionProcessing?.(sid, {
+              canInterrupt: msg.canInterrupt !== false,
+              statusText: typeof msg.statusText === 'string' ? msg.statusText : undefined,
+            });
           } else {
             // Idle ack: ignore it if a newer request started after the
             // subscribe was sent — the ack describes the older state.
@@ -285,6 +289,7 @@ export function useChatRealtimeHandlers({
 
         case 'permission_request': {
           if (!msg.requestId) break;
+          if (sid === activeViewSessionId && msg.provider && msg.provider !== provider) break;
           if (isActionablePermissionRequest({ toolName: msg.toolName })) {
             void playNotificationSound();
           }
@@ -306,7 +311,10 @@ export function useChatRealtimeHandlers({
             }
           }
           if (sid) {
-            onSessionProcessing?.(sid);
+            onSessionProcessing?.(sid, {
+              statusText: msg.toolName === 'AskUserQuestion' ? '等待回答' : '等待审批',
+              canInterrupt: msg.canInterrupt !== false,
+            });
           }
           break;
         }
@@ -316,6 +324,7 @@ export function useChatRealtimeHandlers({
         // clears the prompt in other tabs watching the same run.
         case 'permission_resolved':
         case 'permission_cancelled': {
+          if (sid === activeViewSessionId && msg.provider && msg.provider !== provider) break;
           if (msg.requestId && sid === activeViewSessionId) {
             const nextPendingPermissionRequests = pendingPermissionRequestsRef.current.filter(
               (request: PendingPermissionRequest) => request.requestId !== msg.requestId,

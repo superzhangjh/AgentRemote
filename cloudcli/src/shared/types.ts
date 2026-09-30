@@ -707,6 +707,9 @@ export type CodeEditorFile = {
   // DB projectId; used by the editor to build `/api/file-tree/projects/:projectId/file`
   // URLs for reading and saving content.
   projectId?: string;
+  // Byte size from the file tree, shown on binary/large files that are not
+  // loaded into the editor.
+  size?: number;
   diffInfo?: CodeEditorDiffInfo | null;
   [key: string]: unknown;
 };
@@ -1112,6 +1115,25 @@ export type PreferenceToggleKey =
 
 /** The full set of quick settings booleans keyed by PreferenceToggleKey, held together so the panel can read every toggle from one object. */
 export type QuickSettingsPreferences = Record<PreferenceToggleKey, boolean>;
+
+/**
+ * The chat composer's session tools republished for the quick settings panel:
+ * token usage and scheduled sending plus the callbacks that drive them.
+ * Published by ChatInterface through ComposerToolsContext and read by the
+ * quick settings drawer.
+ */
+export type ComposerToolsSnapshot = {
+  tokenBudget: Record<string, unknown> | null;
+  onShowTokenUsage: () => void;
+  scheduledMessages: ScheduledMessage[];
+  onScheduleMessage: (scheduledFor: Date) => void;
+  onCancelScheduledMessage: (id: string) => void;
+  /**
+   * Reads the composer's live input at call time so the schedule control can
+   * reflect an empty box without republishing the snapshot on every keystroke.
+   */
+  isScheduleDisabled: () => boolean;
+};
 
 
 /** Inline style for the quick settings drag handle, produced by the drag hook from the stored handle position and applied by the handle component. */

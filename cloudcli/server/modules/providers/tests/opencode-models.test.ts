@@ -120,6 +120,62 @@ test('OpenCode uses the curated catalog when CLI discovery is unavailable', asyn
   );
 });
 
+test('OpenCode reads models and reasoning variants from a running server', async () => {
+  await withOpenCodeHome(async (homeDir) => {
+    const descriptorDir = path.join(homeDir, '.agent-remote');
+    await mkdir(descriptorDir, { recursive: true });
+    await writeFile(
+      path.join(descriptorDir, 'opencode-server.json'),
+      JSON.stringify({ url: 'http://127.0.0.1:4096' }),
+      'utf8',
+    );
+  }, async (adapter) => {
+    const originalFetch = globalThis.fetch;
+    let requestedUrl = '';
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({
+        providers: [
+          {
+            id: 'opencode-go',
+            name: 'OpenCode Go',
+            models: {
+              'deepseek-v4.1-flash': {
+                id: 'deepseek-v4.1-flash',
+                name: 'DeepSeek V4.1 Flash',
+                variants: {
+                  low: { reasoningEffort: 'low' },
+                  high: { reasoningEffort: 'high' },
+                  max: { reasoningEffort: 'max' },
+                },
+              },
+              'mimo-v2.5': { id: 'mimo-v2.5', name: 'MiMo V2.5', variants: {} },
+            },
+          },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+
+    try {
+      const models = await adapter.getSupportedModels();
+      assert.equal(requestedUrl, 'http://127.0.0.1:4096/config/providers');
+      assert.deepEqual(
+        models.OPTIONS.map((option) => option.value),
+        ['opencode-go/deepseek-v4.1-flash', 'opencode-go/mimo-v2.5'],
+      );
+      // The server's variants become the effort choices the composer offers.
+      assert.deepEqual(
+        models.OPTIONS[0].effort?.values.map((value) => value.value),
+        ['low', 'high', 'max'],
+      );
+      // A model without variants exposes no effort section.
+      assert.equal(models.OPTIONS[1].effort, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 test('OpenCode session model keeps its provider prefix', async () => {
   await withOpenCodeHome(async (homeDir) => {
     const dbDir = path.join(homeDir, '.local', 'share', 'opencode');

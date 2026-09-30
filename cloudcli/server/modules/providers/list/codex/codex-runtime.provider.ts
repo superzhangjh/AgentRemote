@@ -305,11 +305,32 @@ async function handleCodexServerRequest(
       };
     }
     case 'item/tool/requestUserInput': {
-      const decision = await askUser('AskUserQuestion', { questions: params.questions || [] });
+      const questions: AnyRecord[] = Array.isArray(params.questions)
+        ? params.questions.filter((question): question is AnyRecord => Boolean(question && typeof question === 'object')) : [];
+      const decision = await askUser('AskUserQuestion', {
+        questions: questions.map((question) => ({
+          ...question,
+          options: Array.isArray(question.options) ? question.options : [],
+          multiSelect: false,
+        })),
+      });
       const updatedInput = decision.updatedInput && typeof decision.updatedInput === 'object'
         ? decision.updatedInput as AnyRecord
         : {};
-      return { answers: decision.allow ? updatedInput.answers || {} : {} };
+      const submitted = updatedInput.answers && typeof updatedInput.answers === 'object'
+        ? updatedInput.answers as AnyRecord : {};
+      const answers: Record<string, { answers: string[] }> = {};
+      if (decision.allow) {
+        for (const question of questions) {
+          const answer = submitted[question.question];
+          if (typeof question.id === 'string' && typeof answer === 'string') {
+            // The shared phone panel keys text answers by the question text;
+            // Codex expects stable question ids and an array inside each value.
+            answers[question.id] = { answers: [answer] };
+          }
+        }
+      }
+      return { answers };
     }
     case 'item/permissions/requestApproval': {
       const decision = await askUser('RequestPermissions', {
@@ -529,6 +550,7 @@ async function queryCodex(
     projectPath,
     model,
     effort,
+    fastMode,
     images,
     files,
     permissionMode = 'default'
@@ -753,6 +775,7 @@ async function queryCodex(
       cwd: workingDirectory,
       model: resolvedModel,
       effort: resolvedEffort,
+      fastMode: fastMode === true,
       sandboxMode,
       approvalPolicy,
       turnInput,

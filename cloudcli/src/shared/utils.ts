@@ -88,6 +88,27 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
 
 // ---------------------------
 
+//----------------- ANDROID DOWNLOAD ------------
+
+/** Sends a same-origin file URL to the Android host for confirmation and background download. */
+export function requestNativeDownload(
+  url: string,
+  fileName: string,
+  mimeType?: string,
+): boolean {
+  if (typeof window === 'undefined') return false;
+
+  const channel = (window as Window & {
+    AgentRemoteDownload?: { postMessage: (message: string) => void };
+  }).AgentRemoteDownload;
+  if (!channel) return false;
+
+  channel.postMessage(JSON.stringify({ url, fileName, mimeType }));
+  return true;
+}
+
+// ---------------------------
+
 //----------------- NOTIFICATION SOUND ------------
 
 /** localStorage key holding the user's completion-sound preference. Private to the sound helpers. */

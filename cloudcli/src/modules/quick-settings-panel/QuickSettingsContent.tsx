@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 
 import { DarkModeToggle } from '@/shared/ui';
 import { LanguageSelector } from '@/modules/i18n';
+import { ComposerSessionTools, useComposerTools } from '@/modules/chat';
 import { SETTING_ROW_CLASS } from '@/shared/constants';
 import type { PreferenceToggleKey, QuickSettingsPreferences } from '@/shared/types';
 import QuickSettingsSection from '@/modules/quick-settings-panel/QuickSettingsSection';
@@ -53,15 +54,21 @@ type QuickSettingsContentProps = {
   isDarkMode: boolean;
   preferences: QuickSettingsPreferences;
   onPreferenceChange: (key: PreferenceToggleKey, value: boolean) => void;
+  /** Closes the drawer, used before the token cost modal opens over the full-screen drawer. */
+  onRequestClose: () => void;
 };
 
-/** Rendered by QuickSettingsPanelView to show the drawer's appearance, tool display and input preference rows. */
+/** Rendered by QuickSettingsPanelView to show the drawer's session tools, appearance, tool display and input preference rows. */
 export default function QuickSettingsContent({
   isDarkMode,
   preferences,
   onPreferenceChange,
+  onRequestClose,
 }: QuickSettingsContentProps) {
   const { t } = useTranslation('settings');
+  // The active chat session's tools; absent outside a session, so the whole
+  // session section is hidden rather than showing empty controls.
+  const composerTools = useComposerTools();
   const inputSettingToggles = preferences.voiceEnabled
     ? INPUT_SETTING_TOGGLES
     : INPUT_SETTING_TOGGLES.filter(({ key }) => key !== 'voiceEnabled');
@@ -80,6 +87,12 @@ export default function QuickSettingsContent({
 
   return (
     <div className="flex-1 space-y-6 overflow-y-auto overflow-x-hidden bg-background p-4">
+      {composerTools && (
+        <QuickSettingsSection title={t('quickSettings.sections.session')}>
+          <ComposerSessionTools tools={composerTools} onRequestClose={onRequestClose} />
+        </QuickSettingsSection>
+      )}
+
       <QuickSettingsSection title={t('quickSettings.sections.appearance')}>
         <div className={SETTING_ROW_CLASS}>
           <span className="flex items-center gap-2 text-sm text-foreground">

@@ -273,6 +273,57 @@ test('OpenCode session synchronizer indexes sqlite sessions without deletable tr
   }
 });
 
+test('OpenCode session synchronizer skips subagent child sessions', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'opencode-session-sync-child-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    await createOpenCodeDatabase(tempRoot, workspacePath);
+
+    // A subagent run records its own session with parent_id pointing at the
+    // conversation that spawned it. It must not surface as a sidebar entry, or
+    // every explored task looks like a duplicate session in the project.
+    const childDb = new Database(path.join(tempRoot, '.local', 'share', 'opencode', 'opencode.db'));
+    try {
+      childDb.prepare(`
+        INSERT INTO session (
+          id, project_id, parent_id, slug, directory, title, version, time_created, time_updated
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'open-child-session',
+        'project-1',
+        'open-session-1',
+        'open-child-session',
+        workspacePath,
+        'Explore the codebase (@explore subagent)',
+        '0.0.0',
+        1_700_000_005_000,
+        1_700_000_006_000,
+      );
+    } finally {
+      childDb.close();
+    }
+
+    await withIsolatedDatabase(() => {
+      const synchronizer = new OpenCodeSessionSynchronizer();
+      return Promise.resolve(synchronizer.synchronize()).then((count) => {
+        assert.equal(count, 1);
+        assert.equal(sessionsDb.getSessionById('open-child-session'), null);
+        assert.deepEqual(
+          sessionsDb.getAllSessions().map((session) => session.session_id),
+          ['open-session-1'],
+        );
+      });
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('OpenCode session synchronizer returns the app session id once provider mapping exists', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'opencode-session-sync-mapped-'));
   const workspacePath = path.join(tempRoot, 'workspace');
@@ -491,6 +542,49 @@ test('OpenCode synchronizer preserves the title assigned when CloudCLI creates a
       await new OpenCodeSessionSynchronizer().synchronize();
 
       assert.equal(sessionsDb.getSessionById('app-1')?.custom_name, 'Fix the checkout crash');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('OpenCode synchronizer replaces the creation placeholder with the generated title', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'opencode-session-sync-placeholder-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    await seedOpenCodeSession(tempRoot, workspacePath, {
+      sessionId: 'oc-placeholder-1',
+      title: 'New session - 2026-09-29T04:02:30.001Z',
+      firstUserText: 'This prompt should be ignored',
+    });
+
+    await withIsolatedDatabase(async () => {
+      await new OpenCodeSessionSynchronizer().synchronize();
+      assert.equal(
+        sessionsDb.getSessionById('oc-placeholder-1')?.custom_name,
+        'New session - 2026-09-29T04:02:30.001Z',
+      );
+
+      // OpenCode rewrites the title once the first turn completes. The watcher
+      // observes the newer time_updated and must adopt the generated title.
+      const db = new Database(path.join(tempRoot, '.local', 'share', 'opencode', 'opencode.db'));
+      try {
+        db.prepare('UPDATE session SET title = ?, time_updated = ? WHERE id = ?')
+          .run('会话名与同步进度问题', 1_700_000_002_000, 'oc-placeholder-1');
+      } finally {
+        db.close();
+      }
+
+      await new OpenCodeSessionSynchronizer().synchronize();
+
+      assert.equal(
+        sessionsDb.getSessionById('oc-placeholder-1')?.custom_name,
+        '会话名与同步进度问题',
+      );
     });
   } finally {
     restoreHomeDir();

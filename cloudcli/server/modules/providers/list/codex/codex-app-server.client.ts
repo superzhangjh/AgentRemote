@@ -192,11 +192,11 @@ async function withAppServer<T>(
   };
 
   try {
-    // No optional client capabilities are needed for the stable thread/turn
-    // methods used below.
+    // Turn pagination is gated behind the experimental API capability and lets
+    // native activity checks inspect only the newest turn.
     await request('initialize', {
       clientInfo: { name: 'cloudcli', title: 'CloudCLI', version: '1' },
-      capabilities: {},
+      capabilities: { experimentalApi: true },
     });
     connection.notify('initialized', {});
 
@@ -236,6 +236,7 @@ export const codexAppServer = {
     cwd: string;
     model?: string;
     effort?: string;
+    fastMode?: boolean;
     sandboxMode: 'workspace-write' | 'danger-full-access';
     approvalPolicy: 'on-request' | 'never';
     turnInput: unknown[];
@@ -285,6 +286,10 @@ export const codexAppServer = {
           resolveTerminal();
           return;
         }
+        const params = message.params as { threadId?: string; turnId?: string; turn?: { id?: string; status?: string } } | undefined;
+        if (params?.threadId && threadId && params.threadId !== threadId) {
+          return;
+        }
         if (message.id !== undefined) {
           void input.onServerRequest(message).then(
             (result) => connection.respond(message.id as number | string, result),
@@ -296,10 +301,6 @@ export const codexAppServer = {
           return;
         }
 
-        const params = message.params as { threadId?: string; turnId?: string; turn?: { id?: string; status?: string } } | undefined;
-        if (params?.threadId && threadId && params.threadId !== threadId) {
-          return;
-        }
         if (message.method === 'turn/started' && params?.turn?.id) {
           turnId = params.turn.id;
           if (interruptRequested) {
@@ -323,7 +324,9 @@ export const codexAppServer = {
           cwd: input.cwd,
           ...(threadId ? { threadId } : {}),
           ...(!threadId ? { threadSource: 'appServer' } : {}),
+          ...(!threadId ? { ephemeral: false } : {}),
           ...(input.model ? { model: input.model } : {}),
+          config: { service_tier: input.fastMode ? 'fast' : 'default' },
           sandbox: input.sandboxMode,
           approvalPolicy: input.approvalPolicy,
         };
@@ -370,6 +373,41 @@ export const codexAppServer = {
         unsubscribe();
         input.signal.removeEventListener('abort', abortHandler);
       }
+    });
+  },
+
+  /** Reads Codex's native activity flag without hydrating the transcript. */
+  async getThreadActivity(threadId: string): Promise<boolean> {
+    return withAppServer(async (connection) => {
+      const [threadResult, turnsResult] = await Promise.allSettled([
+        connection.request('thread/read', { threadId }),
+        connection.request('thread/turns/list', {
+          threadId,
+          limit: 1,
+          sortDirection: 'desc',
+        }),
+      ]);
+      const thread = threadResult.status === 'fulfilled'
+        ? (threadResult.value as {
+          thread?: { status?: { type?: unknown } };
+        } | undefined)?.thread
+        : undefined;
+      const turns = turnsResult.status === 'fulfilled'
+        ? (turnsResult.value as { data?: Array<{ status?: unknown }> } | undefined)?.data ?? []
+        : [];
+      if (thread?.status?.type === 'active' || turns[0]?.status === 'inProgress') {
+        return true;
+      }
+      if (thread?.status?.type === 'idle' || (turnsResult.status === 'fulfilled' &&
+        (!turns.length || ['completed', 'interrupted', 'failed'].includes(String(turns[0]?.status))))) {
+        return false;
+      }
+      // notLoaded is local to this new app-server, not proof that another
+      // Codex process is idle. Let the caller inspect the persisted lifecycle.
+      throw new AppError('Codex thread activity is unavailable.', {
+        code: 'CODEX_THREAD_ACTIVITY_UNAVAILABLE',
+        statusCode: 503,
+      });
     });
   },
 

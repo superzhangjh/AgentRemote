@@ -746,8 +746,9 @@ router.post(
 
 router.get(
   '/sessions/running',
-  asyncHandler(async (_req: Request, res: Response) => {
-    const sessions = sessionsService.listRunningSessions();
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId.trim() : undefined;
+    const sessions = await sessionsService.listRunningSessions(sessionId);
     res.json(createApiSuccessResponse({ sessions }));
   }),
 );
@@ -795,7 +796,8 @@ router.get(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
-    const result = sessionsService.getSessionDetailsById(sessionId);
+    const provider = req.query.provider === undefined ? undefined : parseProvider(req.query.provider);
+    const result = sessionsService.getSessionDetailsById(sessionId, provider);
     res.json(createApiSuccessResponse(result));
   }),
 );

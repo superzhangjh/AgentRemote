@@ -53,7 +53,7 @@ const fileTreeFileSystem: FileTreeFileSystem = {
   },
   unlink: (filePath) => fsPromises.unlink(filePath),
   copyFile: (sourcePath, destinationPath) => fsPromises.copyFile(sourcePath, destinationPath),
-  createReadStream: (filePath) => fs.createReadStream(filePath),
+  createReadStream: (filePath, options) => fs.createReadStream(filePath, options),
 };
 
 /**

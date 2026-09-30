@@ -1088,7 +1088,7 @@ export type FileTreeFileSystem = {
   removeDirectory(directoryPath: string): Promise<void>;
   unlink(filePath: string): Promise<void>;
   copyFile(sourcePath: string, destinationPath: string): Promise<void>;
-  createReadStream(filePath: string): Readable;
+  createReadStream(filePath: string, options?: { start?: number; end?: number }): Readable;
 };
 
 /**
@@ -1166,7 +1166,14 @@ export type FileTreeServices = {
   }>;
   createWorkspaceFolder(folderPath: string): Promise<{ success: true; path: string }>;
   readTextFile(projectId: string, filePath: string): Promise<{ content: string; path: string }>;
-  openFile(projectId: string, filePath: string): Promise<{ contentType: string; stream: Readable }>;
+  openFile(projectId: string, filePath: string, rangeHeader?: string | null): Promise<{
+    contentType: string;
+    size: number;
+    start: number;
+    end: number;
+    partial: boolean;
+    stream: Readable;
+  }>;
   saveTextFile(projectId: string, filePath: string, content: string): Promise<{
     success: true;
     path: string;

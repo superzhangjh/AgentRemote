@@ -71,3 +71,19 @@ test('getSessionDetailsById throws SESSION_NOT_FOUND for unknown ids', async () 
     );
   });
 });
+
+test('provider-scoped deep links resolve native ids without selecting another agent', async () => {
+  await withIsolatedDatabase(() => {
+    sessionsDb.createAppSession('shared-id', 'codex', '/workspace/codex');
+    sessionsDb.createAppSession('opencode-app', 'opencode', '/workspace/opencode');
+    sessionsDb.assignProviderSessionId('opencode-app', 'shared-id');
+
+    const details = sessionsService.getSessionDetailsById('shared-id', 'opencode');
+    assert.equal(details.sessionId, 'opencode-app');
+    assert.equal(details.provider, 'opencode');
+    assert.throws(
+      () => sessionsService.getSessionDetailsById('shared-id', 'claude'),
+      (error: unknown) => error instanceof AppError && error.code === 'SESSION_NOT_FOUND',
+    );
+  });
+});

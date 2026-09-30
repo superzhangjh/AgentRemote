@@ -44,6 +44,7 @@ type UseChatComposerStateArgs = {
    */
   currentProviderModel: string;
   currentProviderEffort: string;
+  fastMode?: boolean;
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
   canAbortSession: boolean;
@@ -163,6 +164,7 @@ export function useChatComposerState({
   resolvePermissionModeForProvider,
   currentProviderModel,
   currentProviderEffort,
+  fastMode,
   isLoading,
   canAbortSession,
   tokenBudget,
@@ -175,7 +177,6 @@ export function useChatComposerState({
   scrollToBottom,
   addMessage,
   setIsUserScrolledUp,
-  setPendingPermissionRequests,
 }: UseChatComposerStateArgs) {
   // The composer text together with the chat scope it belongs to. They are one
   // state rather than a value plus a ref because they have to move in lockstep:
@@ -597,6 +598,7 @@ export function useChatComposerState({
     return {
       model: currentProviderModel,
       effort: currentProviderEffort,
+      fastMode: provider === 'codex' && fastMode,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
       toolsSettings,
       skipPermissions: toolsSettings?.skipPermissions || false,
@@ -604,6 +606,7 @@ export function useChatComposerState({
     };
   }, [
     currentProviderEffort,
+    fastMode,
     currentProviderModel,
     permissionMode,
     provider,
@@ -1187,11 +1190,10 @@ export function useChatComposerState({
         });
       });
 
-      setPendingPermissionRequests((previous) =>
-        previous.filter((request) => !validIds.includes(request.requestId)),
-      );
+      // Keep the panel until permission_resolved/permission_cancelled confirms
+      // delivery. A disconnected socket or failed provider reply stays retryable.
     },
-    [sendMessage, setPendingPermissionRequests],
+    [sendMessage],
   );
 
   const [isInputFocused, setIsInputFocused] = useState(false);

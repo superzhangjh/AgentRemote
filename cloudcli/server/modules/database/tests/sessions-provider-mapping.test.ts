@@ -107,3 +107,15 @@ test('legacy provider-keyed rows stay resolvable through both lookups', async ()
     assert.equal(sessionsDb.getSessionByProviderSessionId('legacy-1')?.session_id, 'legacy-1');
   });
 });
+
+test('the same native id in two providers keeps two separate conversations', async () => {
+  await withIsolatedDatabase(() => {
+    const codexId = sessionsDb.createSession('shared-native', 'codex', '/workspace/demo', 'Codex chat');
+    const opencodeId = sessionsDb.createSession('shared-native', 'opencode', '/workspace/demo', 'OpenCode chat');
+
+    assert.notEqual(codexId, opencodeId);
+    assert.equal(sessionsDb.getSessionById(codexId)?.custom_name, 'Codex chat');
+    assert.equal(sessionsDb.getSessionById(opencodeId)?.custom_name, 'OpenCode chat');
+    assert.equal(sessionsDb.getSessionByProviderSessionId('shared-native', 'opencode')?.session_id, opencodeId);
+  });
+});

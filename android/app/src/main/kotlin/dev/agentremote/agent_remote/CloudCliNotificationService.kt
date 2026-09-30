@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -28,6 +29,28 @@ import java.util.concurrent.TimeUnit
 
 /** Keeps CloudCLI's notification socket alive independently of the Flutter WebView. */
 class CloudCliNotificationService : Service() {
+    companion object {
+        // Bumped ids so Android re-applies the importance below on in-place
+        // upgrades; notification channels are immutable once created.
+        // v3: the persistent connection/progress and normal run messages are
+        // silent (low importance, no heads-up); only completion/approval events
+        // pop up.
+        private const val CONNECTION_CHANNEL = "cloudcli_connection_v3"
+        private const val EVENTS_CHANNEL = "cloudcli_events_v3"
+        private const val ATTENTION_CHANNEL = "cloudcli_attention_v3"
+        private val LEGACY_CHANNELS = listOf(
+            "cloudcli_connection", "cloudcli_events", "cloudcli_attention",
+            "cloudcli_connection_v2", "cloudcli_events_v2", "cloudcli_attention_v2"
+        )
+    }
+
+    private data class NotificationChannelSpec(
+        val id: String,
+        val name: String,
+        val importance: Int,
+        val description: String
+    )
+
     private data class TaskProgress(val provider: String, val title: String, val detail: String, val steps: Int) {
         val providerName: String
             get() = when (provider.lowercase()) {
@@ -54,21 +77,48 @@ class CloudCliNotificationService : Service() {
     private var nextEventId = 100
     @Volatile private var generation = 0
     private val refreshConnection = Runnable { connect() }
+    private val channelSpecs = listOf(
+        // The persistent task notification only sits in the shade: low
+        // importance means no heads-up banner, no sound and no vibration.
+        NotificationChannelSpec(
+            CONNECTION_CHANNEL, "CloudCLI 后台连接",
+            NotificationManager.IMPORTANCE_LOW,
+            "在通知栏静默显示后台连接与 Agent 运行进度"
+        ),
+        NotificationChannelSpec(
+            EVENTS_CHANNEL, "Agent 消息",
+            NotificationManager.IMPORTANCE_LOW,
+            "Agent 运行过程中的消息，静默挂在通知栏"
+        ),
+        // Completion / approval / question events actively pop up.
+        NotificationChannelSpec(
+            ATTENTION_CHANNEL, "任务完成与审批",
+            NotificationManager.IMPORTANCE_HIGH,
+            "任务完成、审批和提问提醒，会主动弹出通知"
+        )
+    )
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         if (Build.VERSION.SDK_INT >= 26) {
-            manager.createNotificationChannel(
-                NotificationChannel("cloudcli_connection", "CloudCLI 后台连接", NotificationManager.IMPORTANCE_LOW)
-            )
-            manager.createNotificationChannel(
-                NotificationChannel("cloudcli_events", "Agent 消息", NotificationManager.IMPORTANCE_DEFAULT)
-            )
-            manager.createNotificationChannel(
-                NotificationChannel("cloudcli_attention", "任务完成与审批", NotificationManager.IMPORTANCE_HIGH)
-            )
+            LEGACY_CHANNELS.forEach { manager.deleteNotificationChannel(it) }
+            channelSpecs.forEach { spec ->
+                if (manager.getNotificationChannel(spec.id) == null) {
+                    manager.createNotificationChannel(
+                        NotificationChannel(spec.id, spec.name, spec.importance).apply {
+                            description = spec.description
+                            // Low-importance channels stay silent in the shade;
+                            // only the attention channel alerts.
+                            val alerts = spec.importance >= NotificationManager.IMPORTANCE_HIGH
+                            enableVibration(alerts)
+                            setShowBadge(alerts)
+                            if (alerts) enableLights(true)
+                        }
+                    )
+                }
+            }
         }
     }
 
@@ -97,7 +147,7 @@ class CloudCliNotificationService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "cloudcli_connection")
+        val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CONNECTION_CHANNEL)
             else Notification.Builder(this)
         val latest = runningTasks.values.lastOrNull()
         val agents = runningTasks.values.map { it.providerName }.distinct()
@@ -115,6 +165,9 @@ class CloudCliNotificationService : Service() {
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setCategory(Notification.CATEGORY_STATUS)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+        if (Build.VERSION.SDK_INT < 26) builder.setPriority(Notification.PRIORITY_LOW)
         if (latest != null) {
             builder.setProgress(0, 0, true)
             if (latest.steps > 0) builder.setSubText("已执行 ${latest.steps} 步")
@@ -263,15 +316,37 @@ class CloudCliNotificationService : Service() {
 
     private fun showEvent(payload: JSONObject) {
         val data = payload.optJSONObject("data")
+        val sessionId = data?.optString("sessionId").orEmpty()
+        if (sessionId.isNotBlank() &&
+            store.read("app_foreground") == "true" &&
+            store.read("visible_session_id") == sessionId
+        ) return
+
         val code = data?.optString("code")
         val urgent = code == "permission.required" || code == "agent.notification" || code == "run.stopped" ||
-            code == "run.background_completed"
+            code == "run.background_completed" || code == "run.failed"
+        val notificationId = nextEventId++
+        val provider = data?.optString("provider")?.takeUnless { it.isBlank() || it == "null" }.orEmpty()
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            if (sessionId.isNotBlank()) {
+                putExtra(MainActivity.EXTRA_NOTIFICATION_SESSION_ID, sessionId)
+                putExtra(MainActivity.EXTRA_NOTIFICATION_PROVIDER, provider)
+                setData(
+                    Uri.Builder()
+                        .scheme("agentremote")
+                        .authority("notification")
+                        .appendPath(sessionId)
+                        .appendQueryParameter("provider", provider)
+                        .build()
+                )
+            }
+        }
         val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+            this, notificationId, openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(
-            this, if (urgent) "cloudcli_attention" else "cloudcli_events"
+            this, if (urgent) ATTENTION_CHANNEL else EVENTS_CHANNEL
         )
             else Notification.Builder(this)
         val notification = builder
@@ -280,9 +355,12 @@ class CloudCliNotificationService : Service() {
             .setContentText(payload.optString("body", "有新的 Agent 消息"))
             .setContentIntent(open)
             .setAutoCancel(true)
-            .setPriority(if (urgent) Notification.PRIORITY_HIGH else Notification.PRIORITY_DEFAULT)
+            .setOnlyAlertOnce(!urgent)
+            .setCategory(if (urgent) Notification.CATEGORY_MESSAGE else Notification.CATEGORY_STATUS)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setPriority(if (urgent) Notification.PRIORITY_HIGH else Notification.PRIORITY_LOW)
             .build()
-        manager.notify(nextEventId++, notification)
+        manager.notify(notificationId, notification)
     }
 
     override fun onDestroy() {

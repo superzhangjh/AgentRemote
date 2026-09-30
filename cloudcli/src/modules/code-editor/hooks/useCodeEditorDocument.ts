@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '@/shared/api';
 import type { CodeEditorFile } from '@/shared/types';
+import { requestNativeDownload } from '@/shared/utils';
 import { isBinaryFile } from '@/modules/code-editor/utils/binaryFile';
 import { getPreviewKind } from '@/modules/code-editor/utils/previewableFile';
 
@@ -134,6 +135,36 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
   }, [content, filePath, fileProjectId, previewKind, fileName]);
 
   const handleDownload = useCallback(() => {
+    // Binary and natively-previewable files must be downloaded as raw bytes:
+    // the text buffer is empty for them, so serializing `content` would produce
+    // an empty file. The Android host takes over with its DownloadManager
+    // (real percentage), and other platforms stream a blob through the browser.
+    if (fileProjectId && (isBinaryFile(fileName) || previewKind)) {
+      if (requestNativeDownload(api.fileContentUrl(fileProjectId, filePath), file.name)) {
+        return;
+      }
+      void (async () => {
+        try {
+          const response = await api.readFileBlob(fileProjectId, filePath);
+          if (!response.ok) {
+            throw new Error(`Failed to download file: ${response.status}`);
+          }
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = file.name;
+          document.body.appendChild(anchor);
+          anchor.click();
+          document.body.removeChild(anchor);
+          URL.revokeObjectURL(url);
+        } catch (error) {
+          console.error('Error downloading file:', error);
+        }
+      })();
+      return;
+    }
+
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -146,7 +177,7 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
     document.body.removeChild(anchor);
 
     URL.revokeObjectURL(url);
-  }, [content, file.name]);
+  }, [content, file.name, filePath, fileProjectId, fileName, previewKind]);
 
   return {
     content,

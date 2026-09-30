@@ -16,8 +16,10 @@ type FlatFile = {
 };
 
 // `diffInfo` is intentionally `any` so this resolver can wrap editor handlers
-// that expect a concrete diff payload type as well as generic callers.
-type OnFileOpen = (filePath: string, diffInfo?: any) => void;
+// that expect a concrete diff payload type as well as generic callers. `size`
+// is forwarded unchanged so callers that know it (the file tree) can hand the
+// editor a byte count for binary/large files.
+type OnFileOpen = (filePath: string, diffInfo?: any, size?: number) => void;
 
 const normalize = (value: string): string => value.replace(/\\/g, '/');
 
@@ -96,11 +98,11 @@ export function useFileOpenResolver(
   }, [projectId]);
 
   return useCallback(
-    (filePath: string, diffInfo?: any) => {
+    (filePath: string, diffInfo?: any, size?: number) => {
       const ref = normalize(filePath).trim();
       void loadFiles().then((files) => {
         const match = findBestMatch(files, ref);
-        onFileOpen(match ?? filePath, diffInfo);
+        onFileOpen(match ?? filePath, diffInfo, size);
       });
     },
     [loadFiles, onFileOpen],

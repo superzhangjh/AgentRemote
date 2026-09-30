@@ -76,6 +76,21 @@ test('the watcher path resolves a provider-native id to the same canonical event
   });
 });
 
+test('a canonical app id is not replaced by another providers native id', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('canonical-codex', 'codex', '/workspace/demo');
+    sessionsDb.createAppSession('opencode-app', 'opencode', '/workspace/demo');
+    sessionsDb.assignProviderSessionId('opencode-app', 'canonical-codex');
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    await broadcastSessionUpsertedBatch(['canonical-codex']);
+
+    assert.equal(connection.frames[0]?.sessionId, 'canonical-codex');
+    assert.equal(connection.frames[0]?.provider, 'codex');
+  });
+});
+
 test('a session with no provider id yet reports null rather than omitting the field', async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createAppSession('app-3', 'claude', '/workspace/demo');

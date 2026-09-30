@@ -1,5 +1,6 @@
 import fsSync from 'node:fs';
 
+import { createOpencodeClient } from '@opencode-ai/sdk';
 import crossSpawn from 'cross-spawn';
 import Database from 'better-sqlite3';
 
@@ -9,7 +10,7 @@ import {
   normalizeAttachmentDescriptors
 } from '@/shared/image-attachments.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
-import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell, getOpenCodeDatabasePath } from '@/shared/utils.js';
+import { createCompleteMessage, createNormalizedMessage, flattenPromptForWindowsShell, getOpenCodeDatabasePath, readSharedOpenCodeServerUrl } from '@/shared/utils.js';
 
 // cross-spawn resolves .cmd shims/PATHEXT on Windows and delegates to
 // child_process.spawn everywhere else.
@@ -53,6 +54,73 @@ function resolveOpenCodeEffort(model, effort, modelsDefinition) {
   return typeof effort === 'string' && effort !== 'default' && allowedEfforts.includes(effort)
     ? effort
     : undefined;
+}
+
+/**
+ * Rule CloudCLI appends to a session's permission ruleset so the agent may ask
+ * the user a question. Appended last, it wins over the `question: deny` rule
+ * `opencode run` seeds a fresh session with.
+ */
+const OPENCODE_QUESTION_ALLOW_RULE = { permission: 'question', pattern: '*', action: 'allow' };
+
+/**
+ * Reports whether a session's permission ruleset leaves the `question` tool
+ * allowed.
+ *
+ * Rules are evaluated top-to-bottom with the last matching rule winning, so
+ * only the final `question` rule decides. An absent ruleset (sessions created
+ * directly on the server) leaves every tool at its default, which is allowed.
+ *
+ * Exported for the runtime's tests.
+ */
+export function isOpenCodeQuestionAllowed(permission) {
+  const rules = Array.isArray(permission) ? permission : [];
+  for (let index = rules.length - 1; index >= 0; index -= 1) {
+    const rule = rules[index];
+    if (rule && rule.permission === 'question') {
+      return rule.action === 'allow';
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Ensures the turn's OpenCode session can surface questions to CloudCLI.
+ *
+ * `opencode run` creates sessions whose permission ruleset denies `question`
+ * (the headless CLI has nowhere to render one), so CloudCLI prepares the
+ * session over the shared OpenCode server instead of letting the CLI create it:
+ * a brand-new session is created without the deny, and a resumed session gets
+ * an explicit `question: allow` rule appended. Returns the provider-native
+ * session id to run against, or null when the server could not be used, so the
+ * caller can fall back to the CLI's own session handling.
+ */
+async function prepareOpenCodeSessionForQuestions(serverUrl, directory, providerSessionId, title) {
+  const client = createOpencodeClient({ baseUrl: serverUrl });
+
+  if (!providerSessionId) {
+    const created = await client.session.create({
+      query: { directory },
+      body: title ? { title } : {},
+    });
+    return created?.data?.id ?? null;
+  }
+
+  const current = await client.session.get({
+    path: { id: providerSessionId },
+    query: { directory },
+  });
+  if (isOpenCodeQuestionAllowed(current?.data?.permission)) {
+    return providerSessionId;
+  }
+
+  await client.session.update({
+    path: { id: providerSessionId },
+    query: { directory },
+    body: { permission: [OPENCODE_QUESTION_ALLOW_RULE] },
+  });
+  return providerSessionId;
 }
 
 function readOpenCodeSessionId(event) {
@@ -256,13 +324,42 @@ async function spawnOpenCode(command, options = {}, ws, context) {
       }
 
       const resolvedEffort = resolveOpenCodeEffort(resolvedModel, effort, effortModels);
+      // Attach to the console-managed OpenCode server when the macOS console is
+      // advertising one, so repeated turns reuse it instead of paying a fresh
+      // server boot per message. Without a descriptor OpenCode keeps its
+      // default local-server behavior.
+      const sharedServerUrl = readSharedOpenCodeServerUrl();
       const args = ['run', '--format', 'json'];
       // OpenCode's `run` command owns workspace selection through `--dir`.
       // Relying on the child-process cwd alone is not enough on Linux, where
       // the CLI can still resolve the session under the server install dir.
       args.push('--dir', workingDir);
-      if (providerSessionId) {
-        args.push('--session', providerSessionId);
+      // Prepare the session through the shared server so the agent can ask the
+      // user questions. The CLI would otherwise create the session with a
+      // `question: deny` rule and silently drop every question. Falls back to
+      // the CLI's own session handling when no shared server is available.
+      let runProviderSessionId = providerSessionId;
+      if (sharedServerUrl) {
+        try {
+          const preparedSessionId = await prepareOpenCodeSessionForQuestions(
+            sharedServerUrl,
+            workingDir,
+            providerSessionId,
+            sessionSummary || undefined,
+          );
+          if (preparedSessionId) {
+            if (preparedSessionId !== providerSessionId) {
+              registerSession(preparedSessionId);
+            }
+            runProviderSessionId = preparedSessionId;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn('[OpenCode] Unable to prepare session through the shared server:', message);
+        }
+      }
+      if (runProviderSessionId) {
+        args.push('--session', runProviderSessionId);
       }
       if (resolvedModel) {
         args.push('--model', resolvedModel);
@@ -272,6 +369,9 @@ async function spawnOpenCode(command, options = {}, ws, context) {
       }
       const permissionOptions = resolveOpenCodePermissionOptions(permissionMode);
       args.push(...permissionOptions.args);
+      if (sharedServerUrl) {
+        args.push('--attach', sharedServerUrl);
+      }
       const hasAttachments =
         normalizeAttachmentDescriptors(images).length > 0
         || normalizeAttachmentDescriptors(files).length > 0;
@@ -421,9 +521,39 @@ function getActiveOpenCodeSessions() {
   return Array.from(activeOpenCodeProcesses.keys());
 }
 
+/**
+ * Installed interactive-approval gateway.
+ *
+ * The OpenCode bridge owns the live pending approvals and the SDK client that
+ * answers them, but importing it here would create a providers <-> websocket
+ * import cycle. The server entrypoint installs it instead; until then the facet
+ * reports nothing pending and ignores decisions.
+ */
+let permissionGateway = null;
+
+/**
+ * Wires the OpenCode bridge's approval gateway into this runtime.
+ *
+ * Consumed by the server entrypoint, which is the only place that can see both
+ * the bridge and the provider runtime.
+ */
+export function installOpenCodePermissionGateway(gateway) {
+  permissionGateway = gateway;
+}
+
+const permissions = {
+  resolve(requestId, decision) {
+    permissionGateway?.resolve(requestId, decision);
+  },
+  listPending(sessionId) {
+    return permissionGateway?.listPending(sessionId) ?? [];
+  },
+};
+
 export const opencodeRuntime = {
   run: spawnOpenCode,
   abort: abortOpenCodeSession,
+  permissions,
 };
 
 export {

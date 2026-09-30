@@ -4,7 +4,7 @@ import { renderHook } from '@testing-library/react';
 import { test } from 'vitest';
 
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
-import type { ServerEvent, ProjectSession, PendingPermissionRequest } from '@/shared/types';
+import type { ServerEvent, ProjectSession, PendingPermissionRequest, LLMProvider } from '@/shared/types';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 
 /**
@@ -15,9 +15,10 @@ import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
  * refresh (and lingered forever in a second tab watching the same run).
  */
 
-const renderHandlers = () => {
+const renderHandlers = (provider: LLMProvider = 'claude') => {
   let listener: ((event: ServerEvent) => void) | null = null;
   let pending: PendingPermissionRequest[] = [];
+  const processing: unknown[] = [];
 
   renderHook(() => useChatRealtimeHandlers({
     isActive: true,
@@ -25,7 +26,7 @@ const renderHandlers = () => {
       listener = fn;
       return () => { listener = null; };
     },
-    provider: 'claude',
+    provider,
     selectedSession: { id: 'viewed-session' } as ProjectSession,
     currentSessionId: 'viewed-session',
     setTokenBudget: () => {},
@@ -38,11 +39,12 @@ const renderHandlers = () => {
     lastSeqRef: { current: new Map() },
     statusCheckSentAtRef: { current: new Map() },
     requestLatestMessages: async () => {},
+    onSessionProcessing: (sessionId, options) => processing.push({ sessionId, ...options }),
     sessionStore: { appendRealtime: () => {} } as unknown as SessionStore,
   }));
 
   const dispatch = (event: ServerEvent) => listener?.(event);
-  return { dispatch, getPending: () => pending };
+  return { dispatch, getPending: () => pending, processing };
 };
 
 const requestEvent = (requestId: string, seq: number): ServerEvent => ({
@@ -87,4 +89,26 @@ test('an unanswered request stays pending through a resolution for another id', 
   const pending = getPending();
   assert.equal(pending.length, 1);
   assert.equal(pending[0].requestId, 'req-open');
+});
+
+for (const provider of ['opencode', 'codex'] as const) {
+  test(`${provider} subscription restores pending approvals and waiting phase on the phone`, () => {
+    const { dispatch, getPending, processing } = renderHandlers(provider);
+    dispatch({ kind: 'chat_subscribed', provider, sessionId: 'viewed-session', isProcessing: true,
+      canInterrupt: provider === 'codex', statusText: '等待审批',
+      pendingPermissions: [{ requestId: 'restored-approval', toolName: 'Bash' }],
+    } as unknown as ServerEvent);
+    assert.equal(getPending()[0].requestId, 'restored-approval');
+    assert.deepEqual(processing, [{ sessionId: 'viewed-session', canInterrupt: provider === 'codex', statusText: '等待审批' }]);
+    dispatch({ ...resolvedEvent('restored-approval', 1), provider } as ServerEvent);
+    assert.deepEqual(getPending(), []);
+  });
+}
+
+test('an approval from another provider cannot enter or clear the viewed conversation', () => {
+  const { dispatch, getPending } = renderHandlers('codex');
+  dispatch({ ...requestEvent('codex-open', 1), provider: 'codex' } as ServerEvent);
+  dispatch({ ...requestEvent('opencode-open', 2), provider: 'opencode' } as ServerEvent);
+  dispatch({ ...resolvedEvent('codex-open', 3), provider: 'opencode' } as ServerEvent);
+  assert.deepEqual(getPending().map((request) => request.requestId), ['codex-open']);
 });

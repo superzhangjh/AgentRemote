@@ -1,9 +1,10 @@
 // Binary file extensions (images are handled by ImageViewer, not here)
 const BINARY_EXTENSIONS = [
   // Archives
-  'zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz',
-  // Executables
-  'exe', 'dll', 'so', 'dylib', 'app', 'dmg', 'msi',
+  'zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz', 'tgz', 'zst',
+  // Executables / installers / packages
+  'exe', 'dll', 'so', 'dylib', 'app', 'dmg', 'msi', 'apk', 'aab', 'apks',
+  'xapk', 'ipa', 'deb', 'rpm', 'pkg', 'snap', 'wasm',
   // Media
   'mp3', 'mp4', 'wav', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'm4a', 'ogg',
   // Documents

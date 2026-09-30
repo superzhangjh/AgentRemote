@@ -99,3 +99,64 @@ test('Codex app-server approval requests resolve through the existing chat permi
   assert.ok(messages.some((message) => message.kind === 'permission_resolved' && message.requestId === prompt.requestId));
   assert.ok(messages.some((message) => message.kind === 'complete' && message.exitCode === 0));
 });
+
+test('Codex questions survive pending replay and phone answers use native question ids', async (t) => {
+  const messages: any[] = [];
+  let response: unknown;
+  t.mock.method(codexAppServer, 'runTurn', async (input: Parameters<typeof codexAppServer.runTurn>[0]) => {
+    input.onThread({ id: 'question-native-thread' });
+    const result = input.onServerRequest({ id: 'server-question-id', method: 'item/tool/requestUserInput', params: {
+      threadId: 'question-native-thread', questions: [
+        { id: 'target', question: 'Which target?', header: 'Target', options: [{ label: 'Phone', description: '' }] },
+        { id: 'notes', question: 'Any notes?', header: 'Notes', options: null },
+      ],
+    } });
+    const pending = codexRuntime.permissions.listPending('app-question-session') as any[];
+    assert.equal(pending.length, 1);
+    assert.deepEqual(codexRuntime.permissions.listPending('question-native-thread'), []);
+    assert.deepEqual(pending[0].input.questions[1].options, []);
+    codexRuntime.permissions.resolve(pending[0].requestId, { allow: true, updatedInput: {
+      answers: { 'Which target?': 'Phone', 'Any notes?': 'Keep commas, intact' },
+    } });
+    response = await result;
+    assert.deepEqual(codexRuntime.permissions.listPending('app-question-session'), []);
+  });
+  await codexRuntime.run('ask me', { sessionId: 'app-question-session' }, {
+    isWebSocketWriter: true, send: (message) => messages.push(message),
+  }, {
+    resolveProviderSessionId: () => 'question-native-thread',
+    resolveResumeModel: async () => 'test-model',
+    getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'test-model' }),
+    normalizeMessage: () => [], isProviderInstalled: async () => true,
+  });
+  assert.deepEqual(response, { answers: {
+    target: { answers: ['Phone'] }, notes: { answers: ['Keep commas, intact'] },
+  } });
+  assert.ok(messages.some((message) => message.kind === 'permission_resolved' && message.sessionId === 'app-question-session'));
+});
+
+test('Codex cancellation retracts a pending approval and releases its server request', async (t) => {
+  const messages: any[] = [];
+  let approval: Promise<unknown> | undefined;
+  t.mock.method(codexAppServer, 'runTurn', async (input: Parameters<typeof codexAppServer.runTurn>[0]) => {
+    input.onThread({ id: 'cancel-native-thread' });
+    approval = input.onServerRequest({ id: 91, method: 'item/fileChange/requestApproval', params: {
+      threadId: 'cancel-native-thread', grantRoot: '/workspace/file.ts',
+    } });
+    assert.equal(codexRuntime.permissions.listPending('app-cancel-session').length, 1);
+    assert.equal(codexRuntime.abort('app-cancel-session'), true);
+    assert.deepEqual(await approval, { decision: 'decline' });
+  });
+  await codexRuntime.run('edit a file', { sessionId: 'app-cancel-session' }, {
+    isWebSocketWriter: true, send: (message) => messages.push(message),
+  }, {
+    resolveProviderSessionId: () => 'cancel-native-thread', resolveResumeModel: async () => 'test-model',
+    getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'test-model' }),
+    normalizeMessage: () => [], isProviderInstalled: async () => true,
+  });
+  assert.deepEqual(codexRuntime.permissions.listPending('app-cancel-session'), []);
+  assert.ok(messages.some((message) => message.kind === 'permission_cancelled'));
+  // The terminal `complete` (aborted: true) is emitted by the chat gateway's
+  // abort handler (see handleChatAbort); the runtime must not send a second one.
+  assert.equal(messages.some((message) => message.kind === 'complete'), false);
+});

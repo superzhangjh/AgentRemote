@@ -22,7 +22,7 @@ export const useEditorSidebar = ({
   const resizeHandleRef = useRef<HTMLDivElement | null>(null);
 
   const handleFileOpen = useCallback(
-    (filePath: string, diffInfo: CodeEditorDiffInfo | null = null) => {
+    (filePath: string, diffInfo: CodeEditorDiffInfo | null = null, size?: number) => {
       const normalizedPath = filePath.replace(/\\/g, '/');
       const fileName = normalizedPath.split('/').pop() || filePath;
 
@@ -32,6 +32,8 @@ export const useEditorSidebar = ({
         // DB projectId is forwarded to the editor so it can read/save files
         // via `/api/file-tree/projects/:projectId/file` endpoints.
         projectId: selectedProject?.projectId,
+        // Known byte size lets the binary/preview panel show it without a fetch.
+        size,
         diffInfo,
       });
     },

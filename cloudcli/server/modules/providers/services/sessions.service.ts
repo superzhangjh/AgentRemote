@@ -3,8 +3,9 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
-import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
+import { broadcastSessionUpserted, chatRunRegistry, listExternalBusySessions } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
+import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
 import type {
   FetchHistoryOptions,
@@ -65,6 +66,52 @@ type SessionDetails = {
 };
 
 const MAX_CLOUDCLI_SESSION_NAME_WORDS = 4;
+
+/** Reads the latest persisted turn boundary when a separate app-server cannot observe it. */
+async function readCodexTranscriptActivity(jsonlPath: string): Promise<boolean> {
+  const file = await fsp.open(jsonlPath, 'r');
+  try {
+    let offset = (await file.stat()).size;
+    let remainder = '';
+    while (offset > 0) {
+      const length = Math.min(offset, 64 * 1024);
+      offset -= length;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await file.read(buffer, 0, length, offset);
+      const lines = `${buffer.toString('utf8', 0, bytesRead)}${remainder}`.split('\n');
+      remainder = lines.shift() ?? '';
+      if (offset === 0) lines.unshift(remainder);
+      for (const line of lines.reverse()) {
+        try {
+          const row = JSON.parse(line) as { type?: string; payload?: { type?: string } };
+          if (row.type !== 'event_msg') continue;
+          if (row.payload?.type === 'task_started') return true;
+          if (row.payload?.type === 'task_complete' || row.payload?.type === 'turn_aborted') return false;
+        } catch {
+          // Ignore an incomplete trailing write; the next status poll reads it.
+        }
+      }
+    }
+    return false;
+  } finally {
+    await file.close();
+  }
+}
+
+async function isExternalCodexSessionRunning(sessionId: string): Promise<boolean> {
+  const session = sessionsDb.getSessionById(sessionId);
+  if (session?.provider !== 'codex' || !session.provider_session_id || !session.jsonl_path) {
+    return false;
+  }
+
+  try {
+    return await codexAppServer.getThreadActivity(session.provider_session_id);
+  } catch {
+    // Another app-server can report notLoaded or reject its turn-list API.
+    // Its query failure says nothing about the process that owns this rollout.
+    return readCodexTranscriptActivity(session.jsonl_path).catch(() => false);
+  }
+}
 
 function buildCloudCliSessionName(initialMessage: string): string {
   const words = initialMessage.trim().split(/\s+/).filter(Boolean);
@@ -130,13 +177,63 @@ export const sessionsService = {
    * This is intentionally status-only: callers that only need sidebar activity
    * indicators should not attach to chat streams or request replayed messages.
    */
-  listRunningSessions(): Array<{
+  async listRunningSessions(sessionId?: string): Promise<Array<{
     sessionId: string;
     provider: LLMProvider;
-    startedAt: number;
+    startedAt?: number;
     lastSeq: number;
-  }> {
-    return chatRunRegistry.listRunningRuns();
+    canInterrupt: boolean;
+    /** Short phase label for externally-owned runs ("等待审批", "等待回答", ...). */
+    statusText?: string | null;
+  }>> {
+    const running = chatRunRegistry.listRunningRuns().map((session) => ({
+      ...session,
+      canInterrupt: true,
+    }));
+    const knownSessionIds = new Set(running.map((session) => session.sessionId));
+
+    // OpenCode runs started outside CloudCLI are reported by the bridge in the
+    // same shape, but cannot be interrupted from here.
+    const externalRunning = listExternalBusySessions()
+      .filter((session) => !knownSessionIds.has(session.sessionId))
+      .map((session) => ({
+        sessionId: session.sessionId,
+        provider: session.provider,
+        lastSeq: 0,
+        canInterrupt: false,
+        statusText: session.statusText,
+      }));
+    for (const session of externalRunning) {
+      knownSessionIds.add(session.sessionId);
+    }
+    const merged = [...running, ...externalRunning];
+
+    if (
+      !sessionId ||
+      knownSessionIds.has(sessionId) ||
+      !(await isExternalCodexSessionRunning(sessionId))
+    ) {
+      return merged;
+    }
+
+    return [
+      ...merged,
+      {
+        sessionId,
+        provider: 'codex',
+        lastSeq: 0,
+        // Started by the Codex desktop app or CLI, which owns its own
+        // app-server turn: CloudCLI can mirror the activity but cannot answer
+        // that turn's approvals, so the label says so.
+        canInterrupt: false,
+        statusText: '外部运行中',
+      },
+    ];
+  },
+
+  /** Detects turns started by the native Codex desktop app or CLI. */
+  isExternalCodexSessionRunning(sessionId: string): Promise<boolean> {
+    return isExternalCodexSessionRunning(sessionId);
   },
 
   /**
@@ -498,9 +595,9 @@ export const sessionsService = {
    * session opened directly by URL may not be present client-side at all —
    * this lookup is the authoritative way to learn which project owns it.
    */
-  getSessionDetailsById(sessionId: string): SessionDetails {
+  getSessionDetailsById(sessionId: string, provider?: LLMProvider): SessionDetails {
     const session =
-      sessionsDb.getSessionById(sessionId) ?? sessionsDb.getSessionByProviderSessionId(sessionId);
+      sessionsDb.getSessionById(sessionId, provider) ?? sessionsDb.getSessionByProviderSessionId(sessionId, provider);
     if (!session) {
       throw new AppError(`Session "${sessionId}" was not found.`, {
         code: 'SESSION_NOT_FOUND',

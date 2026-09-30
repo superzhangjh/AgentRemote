@@ -1,13 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownIcon } from 'lucide-react';
 
 import { useTasksSettings } from '@/modules/task-master';
+import { useAuth } from '@/modules/auth';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import PermissionContext from '@/modules/chat/context/PermissionContext';
+import { usePublishComposerTools } from '@/modules/chat/context/ComposerToolsContext';
 import { api } from '@/shared/api';
 import type {
   ChatMessage,
+  ComposerToolsSnapshot,
   Project,
   ProjectSession,
   SessionEstablishedContext,
@@ -71,13 +74,19 @@ function ChatInterface({
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe } = useWebSocket();
   const { t } = useTranslation('chat');
+  const [fastMode, setFastMode] = useState(() => localStorage.getItem('codex-fast-mode') === 'true');
+  const toggleFastMode = useCallback(() => setFastMode((current) => {
+    localStorage.setItem('codex-fast-mode', String(!current));
+    return !current;
+  }), []);
   const processingSessions = useProcessingSessions();
   const {
     markSessionProcessing: onSessionProcessing,
     markSessionIdle: onSessionIdle,
   } = useSessionProtectionActions();
 
-  const sessionStore = useSessionStore();
+  const { user } = useAuth();
+  const sessionStore = useSessionStore(user ? String(user.id ?? user.username) : null);
   const streamTimerRef = useRef<number | null>(null);
   const accumulatedStreamRef = useRef('');
   // When each session's `chat.subscribe` was last sent; idle acks older than
@@ -133,22 +142,12 @@ function ChatInterface({
     currentSessionId,
     setCurrentSessionId,
     isLoadingSessionMessages,
-    isLoadingMoreMessages,
-    hasMoreMessages,
-    totalMessages,
     isUserScrolledUp,
     setIsUserScrolledUp,
     tokenBudget,
     setTokenBudget,
-    visibleMessageCount,
     visibleMessages,
-    loadEarlierMessages,
-    loadAllMessages,
     loadFullTranscript,
-    allMessagesLoaded,
-    isLoadingAllMessages,
-    loadAllJustFinished,
-    showLoadAllOverlay,
     createDiff,
     scrollContainerRef,
     scrollToBottom,
@@ -239,6 +238,7 @@ function ChatInterface({
     cyclePermissionMode,
     currentProviderModel,
     currentProviderEffort,
+    fastMode,
     isLoading: isProcessing,
     processingSessions,
     canAbortSession,
@@ -355,12 +355,34 @@ function ChatInterface({
     const scheduled = await scheduleMessage({
       content,
       scheduledFor,
-      options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
+      options: { model: currentProviderModel, effort: currentProviderEffort, fastMode: provider === 'codex' && fastMode, permissionMode },
     });
     if (scheduled) {
       setInput('');
     }
-  }, [currentProviderEffort, currentProviderModel, input, permissionMode, scheduleMessage, setInput]);
+  }, [currentProviderEffort, currentProviderModel, fastMode, input, permissionMode, provider, scheduleMessage, setInput]);
+
+  // The callbacks below depend on the composer's live `input`, which changes on
+  // every keystroke. They are held in refs so the snapshot the quick settings
+  // drawer reads stays referentially stable between token/turn updates and only
+  // republishes when it actually has new data.
+  const scheduleMessageRef = useRef(handleScheduleMessage);
+  scheduleMessageRef.current = handleScheduleMessage;
+  const showTokenUsageRef = useRef(showCostModal);
+  showTokenUsageRef.current = showCostModal;
+  const scheduleDisabledRef = useRef(true);
+  scheduleDisabledRef.current = !input.trim();
+
+  const composerTools = useMemo<ComposerToolsSnapshot>(() => ({
+    tokenBudget,
+    onShowTokenUsage: () => showTokenUsageRef.current(),
+    scheduledMessages,
+    onScheduleMessage: (scheduledFor) => scheduleMessageRef.current(scheduledFor),
+    onCancelScheduledMessage: cancelScheduledMessage,
+    isScheduleDisabled: () => scheduleDisabledRef.current,
+  }), [cancelScheduledMessage, scheduledMessages, tokenBudget]);
+
+  usePublishComposerTools(composerTools);
 
   const permissionContextValue = useMemo(() => ({
     pendingPermissionRequests,
@@ -420,11 +442,8 @@ function ChatInterface({
       <div className="flex h-full min-h-0 flex-col">
         <ChatMessagesPane
           scrollContainerRef={scrollContainerRef}
-          // Not redundant with the `scroll` listener. A first page is 20 rows,
-          // tool results fold into their calls, and the "load earlier" link is
-          // hidden while more pages exist — so a short transcript is often not
-          // scrollable at all and never emits `scroll`. Wheel and touch are
-          // then the only way to reach the top pager or the "load all" overlay.
+          // Wheel and touch also reveal older cached rows when a short
+          // transcript does not emit a scroll event.
           onWheel={handleScroll}
           onTouchMove={handleScroll}
           isLoadingSessionMessages={isLoadingSessionMessages}
@@ -445,18 +464,7 @@ function ChatInterface({
           isTaskMasterInstalled={isTaskMasterInstalled}
           onShowAllTasks={onShowAllTasks}
           setInput={setInput}
-          isLoadingMoreMessages={isLoadingMoreMessages}
-          hasMoreMessages={hasMoreMessages}
-          totalMessages={totalMessages}
-          sessionMessagesCount={chatMessages.length}
-          visibleMessageCount={visibleMessageCount}
           visibleMessages={visibleMessages}
-          loadEarlierMessages={loadEarlierMessages}
-          loadAllMessages={loadAllMessages}
-          allMessagesLoaded={allMessagesLoaded}
-          isLoadingAllMessages={isLoadingAllMessages}
-          loadAllJustFinished={loadAllJustFinished}
-          showLoadAllOverlay={showLoadAllOverlay}
           createDiff={createDiff}
           onFileOpen={onFileOpen}
           onShowSettings={onShowSettings}
@@ -505,13 +513,10 @@ function ChatInterface({
           availableModelOptions={currentProviderModelOptions}
           onSelectModel={handleSelectComposerModel}
           modelsLoading={providerModelsLoading}
-          tokenBudget={tokenBudget}
-          onShowTokenUsage={showCostModal}
+          fastMode={fastMode}
+          onToggleFastMode={provider === 'codex' ? toggleFastMode : undefined}
           isEditingSentMessage={Boolean(editingAnchorId)}
           onCancelEditMessage={cancelEditMessage}
-          scheduledMessages={scheduledMessages}
-          onScheduleMessage={handleScheduleMessage}
-          onCancelScheduledMessage={cancelScheduledMessage}
           slashCommandsCount={slashCommandsCount}
           onToggleCommandMenu={handleToggleCommandMenu}
           hasInput={Boolean(input.trim())}
