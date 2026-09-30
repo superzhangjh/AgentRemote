@@ -372,8 +372,6 @@
     "retryHint": "Tap to reconnect now",
     "retry": "Retry",
     "offlineBanner": "Connection to the server was lost",
-    "connectingBanner": "Reconnecting to the server…",
-    "newBundle": "A new interface is available",
-    "reloadNow": "Reload"
+    "connectingBanner": "Reconnecting to the server…"
   }
 }

@@ -15,6 +15,19 @@ import {
 
 type EffortOption = NonNullable<ProviderModelOption['effort']>['values'][number];
 
+/**
+ * Drops the `<providerID>/` routing prefix OpenCode puts in front of a model id
+ * (for example `opencode-go/deepseek-v4.1-flash`) so the trigger shows just the
+ * model name when the loaded catalog has no matching option to borrow a label
+ * from. Only the display string is trimmed; the selection value stays a route.
+ */
+const formatModelLabel = (value: string): string => {
+  const separatorIndex = value.indexOf('/');
+  return separatorIndex > 0 && separatorIndex < value.length - 1
+    ? value.slice(separatorIndex + 1)
+    : value;
+};
+
 type ComposerModelMenuProps = {
   effort: string;
   /** Effort values the active provider/model actually accepts; empty hides the section. */
@@ -69,7 +82,7 @@ function ComposerModelMenu({
     () => modelOptions.find((option) => option.value === model) ?? null,
     [model, modelOptions],
   );
-  const modelLabel = selectedModelOption?.label || model;
+  const modelLabel = selectedModelOption?.label || formatModelLabel(model);
 
   const hasEffortSection = resolvedEffortOptions.length > 0;
   const hasModelSection = modelOptions.length > 0 || modelsLoading;
@@ -91,7 +104,7 @@ function ComposerModelMenu({
           updateAnchor();
           setIsOpen((current) => !current);
         }}
-        className="flex h-8 max-w-20 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted sm:max-w-56"
+        className="flex h-8 max-w-36 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted sm:max-w-56"
         aria-haspopup="menu"
         aria-expanded={isOpen}
         aria-label={ariaLabel}
@@ -165,7 +178,7 @@ function ComposerModelMenu({
                   {modelOptions.map((option) => (
                     <ComposerMenuItem
                       key={option.value}
-                      label={option.label || option.value}
+                      label={option.label || formatModelLabel(option.value)}
                       isSelected={option.value === model}
                       onSelect={() => {
                         onSelectModel(option.value);

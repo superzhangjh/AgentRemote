@@ -289,8 +289,6 @@
     "retryHint": "点击立即重连",
     "retry": "重试",
     "offlineBanner": "与服务器的连接已断开",
-    "connectingBanner": "正在重新连接服务器…",
-    "newBundle": "界面已更新",
-    "reloadNow": "点此刷新"
+    "connectingBanner": "正在重新连接服务器…"
   }
 }

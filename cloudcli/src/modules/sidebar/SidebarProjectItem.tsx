@@ -184,10 +184,15 @@ function SidebarProjectItem({
           'relative mx-3 flex cursor-pointer select-none items-center gap-2 rounded-lg pl-1 pr-0 transition-colors',
           isCompact ? 'py-2' : 'py-1.5',
           // The background is owned by one thing only: pinning. Hover and
-          // selection deliberately do not touch it — the previous hover shade
-          // was the same colour as an ordinary row's hover, which read as the
-          // pin disappearing the moment the row was touched.
-          isStarred ? 'bg-muted ring-1 ring-inset ring-border/60' : 'hover:bg-accent/40',
+          // selection deliberately do not touch it.
+          //
+          // Tinted from `muted-foreground` rather than `muted`: in the light
+          // theme `muted` is 91% lightness against a 96% background, which is
+          // five points — technically a colour, visually nothing. This reads as
+          // the same light grey on the dark theme (15% against 8%).
+          isStarred
+            ? 'bg-muted-foreground/15 ring-1 ring-inset ring-border/60'
+            : 'hover:bg-accent/40',
         )}
       >
         {/* Running swaps the folder glyph itself, so the indicator costs no
