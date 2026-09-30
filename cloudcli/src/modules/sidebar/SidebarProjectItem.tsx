@@ -186,13 +186,13 @@ function SidebarProjectItem({
           // The background is owned by one thing only: pinning. Hover and
           // selection deliberately do not touch it.
           //
-          // Tinted from `muted-foreground` rather than `muted`: in the light
-          // theme `muted` is 91% lightness against a 96% background — five
-          // points, technically a colour and visually nothing. This reads as a
-          // clear light grey on the light theme and the equivalent on the dark
-          // one (20% against 8%).
+          // Opaque, ring-free pin: an alpha background plus an inset ring is
+          // the kind of paint an Android WebView can drop once the expanding
+          // sibling forces the row into its own compositing layer, which is
+          // exactly when the tint was reported to vanish. Neutral greys need
+          // no theme maths and no compositing.
           isStarred
-            ? 'bg-muted-foreground/20 ring-1 ring-inset ring-border/50'
+            ? 'bg-neutral-200 dark:bg-neutral-800'
             : 'hover:bg-accent/40',
         )}
       >
