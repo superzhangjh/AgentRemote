@@ -208,7 +208,7 @@ function SidebarProjectItem({
             the sessions show their own dots. */}
         {isAwaitingInput ? (
           <span
-            className="absolute -left-1.5 top-1/2 h-2 w-2 -translate-y-1/2 animate-pulse rounded-full bg-blue-500"
+            className="absolute -left-1.5 top-1/2 h-2 w-2 -translate-y-1/2 animate-pulse rounded-full bg-blue-500 motion-reduce:animate-none"
             title={t('tooltips.awaitingInputIndicator', { defaultValue: 'Waiting for your answer' })}
           />
         ) : isProcessing && !isExpanded ? (

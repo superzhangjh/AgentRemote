@@ -56,16 +56,22 @@ const renderRow = (state: { isProcessing?: boolean; needsAttention?: boolean; is
   return container.querySelector('[role="status"]')?.className ?? null;
 };
 
-test('a run waiting on the user shows the blue dot', () => {
-  assert.match(renderRow({ isAwaitingInput: true, isProcessing: true }) ?? '', /bg-blue-500/);
+test('a run waiting on the user shows the blue, breathing dot', () => {
+  const className = renderRow({ isAwaitingInput: true, isProcessing: true }) ?? '';
+  assert.match(className, /bg-blue-500/);
+  assert.match(className, /animate-pulse/);
 });
 
-test('a working run shows the amber dot', () => {
-  assert.match(renderRow({ isProcessing: true }) ?? '', /bg-amber-500/);
+test('a working run shows the amber, breathing dot', () => {
+  const className = renderRow({ isProcessing: true }) ?? '';
+  assert.match(className, /bg-amber-500/);
+  assert.match(className, /animate-pulse/);
 });
 
-test('a finished unread run shows the green dot', () => {
-  assert.match(renderRow({ needsAttention: true }) ?? '', /bg-emerald-500/);
+test('a finished unread run shows the green dot, which does not animate', () => {
+  const className = renderRow({ needsAttention: true }) ?? '';
+  assert.match(className, /bg-emerald-500/);
+  assert.doesNotMatch(className, /animate-/);
 });
 
 test('an idle, read session shows no dot', () => {

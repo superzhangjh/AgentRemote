@@ -119,11 +119,12 @@ function SidebarSessionItem({
 
   // Session status lives in the row's leading column, as a dot, one colour per
   // meaning: blue while the run waits on the user, amber while it works, green
-  // once it has finished with something unread.
+  // once it has finished with something unread. Both live states breathe — an
+  // indicator that never moves reads as a static decoration.
   const statusDot = isAwaitingInput
-    ? { className: 'bg-blue-500 animate-pulse', title: t('tooltips.awaitingInputIndicator', { defaultValue: 'Waiting for your answer' }) }
+    ? { className: 'bg-blue-500 animate-pulse motion-reduce:animate-none', title: t('tooltips.awaitingInputIndicator', { defaultValue: 'Waiting for your answer' }) }
     : isProcessing
-      ? { className: 'bg-amber-500', title: t('tooltips.processingSessionIndicator', 'Processing session') }
+      ? { className: 'bg-amber-500 animate-pulse motion-reduce:animate-none', title: t('tooltips.processingSessionIndicator', 'Processing session') }
       : showAttentionIndicator
         ? { className: 'bg-emerald-500', title: t('tooltips.completedUnreadIndicator', { defaultValue: 'Finished since you last looked' }) }
         : null;

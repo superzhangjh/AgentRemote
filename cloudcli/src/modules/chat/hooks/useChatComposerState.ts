@@ -772,6 +772,14 @@ export function useChatComposerState({
       // handoff later — this id stays valid for the conversation's lifetime.
       let targetSessionId = selectedSession?.id || currentSessionId || null;
       if (!targetSessionId) {
+        if (provider === 'opencode' && !openCodeServerId) {
+          addMessage({
+            type: 'error',
+            content: '请先选择一个可用的 OpenCode 实例。',
+            timestamp: new Date(),
+          });
+          return;
+        }
         let createdSessionName = sessionSummary;
         try {
           const response = await api.providers.createSession({

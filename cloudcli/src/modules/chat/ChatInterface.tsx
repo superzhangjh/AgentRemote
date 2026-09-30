@@ -75,6 +75,11 @@ function ChatInterface({
   const { subscribe } = useWebSocket();
   const { t } = useTranslation('chat');
   const [fastMode, setFastMode] = useState(() => localStorage.getItem('codex-fast-mode') === 'true');
+  // The choice is saved before session creation and then pinned to that session by the server.
+  const [openCodeServers, setOpenCodeServers] = useState<Array<{ id: string; label: string; url: string }>>([]);
+  const [openCodeServerId, setOpenCodeServerId] = useState<string>('');
+  const [openCodeServersError, setOpenCodeServersError] = useState<string | null>(null);
+
   const toggleFastMode = useCallback(() => setFastMode((current) => {
     localStorage.setItem('codex-fast-mode', String(!current));
     return !current;
@@ -170,6 +175,28 @@ function ChatInterface({
     sessionStore,
   });
 
+  useEffect(() => {
+    if (provider !== 'opencode' || selectedSession || currentSessionId) return;
+    let cancelled = false;
+    void api.providers.openCodeServers().then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      const servers = Array.isArray(body?.data) ? body.data as Array<{ id: string; label: string; url: string }> : [];
+      if (cancelled) return;
+      setOpenCodeServers(servers);
+      setOpenCodeServersError(servers.length ? null : '未找到可用的 OpenCode 服务');
+      const preferred = localStorage.getItem('preferred-open-code-server');
+      setOpenCodeServerId(servers.find((server) => server.id === preferred)?.id ?? servers[0]?.id ?? '');
+    }).catch(() => {
+      if (!cancelled) setOpenCodeServersError('无法读取 OpenCode 服务');
+    });
+    return () => { cancelled = true; };
+  }, [provider, selectedSession?.id, currentSessionId]);
+
+  const handleSelectOpenCodeServer = useCallback((id: string) => {
+    setOpenCodeServerId(id);
+    localStorage.setItem('preferred-open-code-server', id);
+  }, []);
   // Brand-new conversation: the composer allocated a stable session id via
   // the session gateway before the first send. Record it locally and put it
   // in the URL — this id never changes again, so there is no later handoff.
@@ -234,6 +261,7 @@ function ChatInterface({
     selectedSession,
     currentSessionId,
     provider,
+    openCodeServerId,
     permissionMode,
     cyclePermissionMode,
     currentProviderModel,
@@ -569,6 +597,10 @@ function ChatInterface({
           availablePermissionModes={availablePermissionModes}
           onSelectPermissionMode={selectPermissionMode}
           providerLabel={selectedProviderLabel}
+          openCodeServers={provider === 'opencode' && !selectedSession && !currentSessionId ? openCodeServers : undefined}
+          selectedOpenCodeServerId={openCodeServerId}
+          onSelectOpenCodeServer={handleSelectOpenCodeServer}
+          openCodeServersError={openCodeServersError}
           effort={currentProviderEffort}
           availableEffortOptions={currentProviderEffortOptions}
           onSelectEffort={handleSelectComposerEffort}

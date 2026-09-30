@@ -152,7 +152,7 @@ export default function SidebarRecentConversations({
                         : t('tooltips.completedUnreadIndicator', { defaultValue: 'Finished since you last looked' })}
                       className={cn(
                         'h-2 w-2 rounded-full',
-                        isAwaitingInput ? 'animate-pulse bg-blue-500' : 'bg-emerald-500',
+                        isAwaitingInput ? 'animate-pulse bg-blue-500 motion-reduce:animate-none' : 'bg-emerald-500',
                       )}
                     />
                   </Tooltip>

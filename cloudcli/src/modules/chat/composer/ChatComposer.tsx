@@ -479,7 +479,7 @@ export default function ChatComposer({
                 >
                   {openCodeServers.length === 0 && <option value="">{openCodeServersError ?? '未找到 OpenCode 服务'}</option>}
                   {openCodeServers.map((server) => (
-                    <option key={server.id} value={server.id}>{server.label} ({new URL(server.url).port})</option>
+                    <option key={server.id} value={server.id}>{server.label} · {server.url}</option>
                   ))}
                 </select>
               </label>
