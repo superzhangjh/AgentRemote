@@ -7,6 +7,7 @@ import { cn } from '@/shared/utils';
 import MobileMenuButton from '@/modules/project-workspace/MobileMenuButton';
 import WorkspaceTabs from '@/modules/project-workspace/WorkspaceTabs';
 import WorkspaceTitle from '@/modules/project-workspace/WorkspaceTitle';
+import ConnectionBanner from '@/modules/project-workspace/ConnectionBanner';
 
 type WorkspaceHeaderProps = {
   activeTab: AppTab;
@@ -93,6 +94,7 @@ export default function WorkspaceHeader({
 
   return (
     <header className="pwa-header-safe flex-shrink-0 border-b border-border/60 bg-background/95 px-3 py-1.5 backdrop-blur-sm sm:px-4 sm:py-2">
+      <ConnectionBanner />
       <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
         <div className="flex min-w-0 items-center gap-2 sm:max-w-[min(34%,24rem)] sm:flex-[1_1_18rem]">
           {isMobile && <MobileMenuButton onMenuClick={onMenuClick} />}

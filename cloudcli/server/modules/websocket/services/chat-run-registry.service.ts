@@ -283,6 +283,7 @@ export const chatRunRegistry = {
     provider: LLMProvider;
     startedAt: number;
     lastSeq: number;
+    statusText: string | null;
   }> {
     return Array.from(runs.values())
       .filter((run) => run.status === 'running')
@@ -291,6 +292,10 @@ export const chatRunRegistry = {
         provider: run.provider,
         startedAt: run.startedAt,
         lastSeq: run.lastSeq,
+        // The same phase label `session_activity` broadcasts. A client that
+        // missed those frames (a phone whose WebView was suspended) polls this
+        // endpoint, and without the label it could only show a generic spinner.
+        statusText: run.notificationDetail,
       }));
   },
 

@@ -315,6 +315,22 @@ const DISPLAY_HOST = getConnectableHost(HOST);
 const VITE_PORT = process.env.VITE_PORT || 5173;
 const LOCAL_SERVER_MARKER_PATH = path.join(os.homedir(), '.cloudcli', 'local-server.json');
 
+/**
+ * The address the listener actually bound.
+ *
+ * `HOST` is what was asked for — the console pins it to a specific LAN address
+ * so the service is reachable from the phone. That address can be missing at
+ * boot (the interface is not up yet) or after a network change, and binding to
+ * it then fails with EADDRNOTAVAIL. Under launchd `KeepAlive` the failure is
+ * not a one-off: the process restarts, fails again, and the crash loop keeps
+ * the phone without a server while the console still reports "running".
+ *
+ * Falling back to the wildcard address keeps the service reachable on every
+ * current interface instead. The marker below records what actually bound, so
+ * the watchdog probes an address that exists.
+ */
+let boundHost = HOST;
+
 function getErrorCode(error: unknown): string | undefined {
     if (typeof error !== 'object' || error === null || !('code' in error)) {
         return undefined;
@@ -327,11 +343,13 @@ function getErrorMessage(error: unknown): string {
 }
 
 async function writeLocalServerMarker() {
+    // Records the address the listener actually bound, which can differ from
+    // the requested one after a fallback.
     const marker = {
         pid: process.pid,
-        host: HOST,
+        host: boundHost,
         port: Number.parseInt(String(SERVER_PORT), 10),
-        url: `http://${DISPLAY_HOST}:${SERVER_PORT}`,
+        url: `http://${getConnectableHost(boundHost)}:${SERVER_PORT}`,
         installMode,
         appRoot: APP_ROOT,
         updatedAt: new Date().toISOString(),
@@ -382,7 +400,7 @@ async function startServer() {
 
         console.log(`${terminalTextStyles.info('[INFO]')} To run in development mode with hot-module replacement, go to http://${DISPLAY_HOST}:${VITE_PORT}`);
    
-        server.listen(SERVER_PORT, HOST, async () => {
+        const startRuntimeServices = async () => {
             const appInstallPath = APP_ROOT;
             await writeLocalServerMarker().catch((error) => {
                 console.warn('[WARN] Could not write local server marker:', error.message);
@@ -393,7 +411,7 @@ async function startServer() {
             console.log(`  ${terminalTextStyles.bright('CloudCLI Server - Ready')}`);
             console.log(terminalTextStyles.dim('═'.repeat(63)));
             console.log('');
-            console.log(`${terminalTextStyles.info('[INFO]')} Server URL:  ${terminalTextStyles.bright('http://' + DISPLAY_HOST + ':' + SERVER_PORT)}`);
+            console.log(`${terminalTextStyles.info('[INFO]')} Server URL:  ${terminalTextStyles.bright('http://' + getConnectableHost(boundHost) + ':' + SERVER_PORT)}`);
             console.log(`${terminalTextStyles.info('[INFO]')} Installed at: ${terminalTextStyles.dim(appInstallPath)}`);
             console.log(`${terminalTextStyles.tip('[TIP]')}  Run "cloudcli status" for full configuration details`);
             console.log('');
@@ -414,6 +432,35 @@ async function startServer() {
             startEnabledPluginServers().catch(err => {
                 console.error('[Plugins] Error during startup:', err.message);
             });
+        };
+
+        // A bind failure is a configured-address problem, not a code bug:
+        // retry on the wildcard address before giving up, so a network change
+        // does not turn into a restart loop that takes the phone offline.
+        server.on('error', (error: NodeJS.ErrnoException) => {
+            const code = getErrorCode(error);
+            if ((code === 'EADDRNOTAVAIL' || code === 'EADDRINUSE') && boundHost !== '0.0.0.0') {
+                console.error(`[ERROR] Could not listen on ${boundHost}:${SERVER_PORT} (${code}).`);
+                console.error('[ERROR] That address is not available on this machine right now; retrying on 0.0.0.0 so the service stays reachable.');
+                boundHost = '0.0.0.0';
+                server.listen(SERVER_PORT, boundHost, () => {
+                    void startRuntimeServices();
+                });
+                return;
+            }
+
+            console.error('[ERROR] CloudCLI server failed to listen:', getErrorMessage(error));
+            if (code === 'EADDRINUSE' || code === 'EADDRNOTAVAIL') {
+                // A second failure on the wildcard address: exit instead of
+                // sitting alive without a socket, so the supervisor restarts
+                // the process into a clean slate.
+                process.exit(1);
+            }
+            process.exitCode = 1;
+        });
+
+        server.listen(SERVER_PORT, boundHost, () => {
+            void startRuntimeServices();
         });
 
         await closeSessionsWatcher();

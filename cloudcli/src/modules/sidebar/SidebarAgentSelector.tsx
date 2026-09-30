@@ -1,7 +1,7 @@
-import { useRef } from 'react';
-import { Check, ChevronDown } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
-import { LLMProviderLogo } from '@/shared/ui';
+import { LLMProviderLogo, Pill, PillBar } from '@/shared/ui';
+import { cn } from '@/shared/utils';
 import type { LLMProvider } from '@/shared/types';
 
 type SidebarAgentSelectorProps = {
@@ -14,43 +14,47 @@ const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode'];
 const providerName = (provider: LLMProvider) =>
   provider === 'opencode' ? 'OpenCode' : provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : 'Claude';
 
-/** Used by SidebarHeader to switch the Agent shown in the unified project and conversation tree. */
+/**
+ * Switches which Agent the unified project and conversation tree shows.
+ *
+ * A segmented bar rather than the previous dropdown: with four agents the whole
+ * set fits, the active one is always readable without opening anything, and
+ * switching costs one tap instead of two. The inactive segments are logo-only
+ * so four of them fit the sidebar width without truncating a name; the active
+ * segment carries its label, which is also the one the user is reading.
+ */
 export default function SidebarAgentSelector({ selectedProvider, onProviderChange }: SidebarAgentSelectorProps) {
-  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const { t } = useTranslation('sidebar');
 
   return (
-    <details
-      ref={detailsRef}
-      className="group relative mt-2"
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-          detailsRef.current?.removeAttribute('open');
-        }
-      }}
+    <PillBar
+      className="mt-2 w-full"
+      role="radiogroup"
+      aria-label={t('agentSelector.label', 'Agent')}
     >
-      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg border border-border/60 bg-muted/40 px-3 py-2 text-sm text-foreground marker:hidden hover:bg-accent/60 [&::-webkit-details-marker]:hidden">
-        <LLMProviderLogo provider={selectedProvider} className="h-4 w-4" />
-        <span className="min-w-0 flex-1">{providerName(selectedProvider)}</span>
-        <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="absolute inset-x-0 top-full z-30 mt-1 rounded-lg border border-border bg-popover p-1 shadow-lg" role="group" aria-label="Agent">
-        {PROVIDERS.map((provider) => (
-          <button
+      {PROVIDERS.map((provider) => {
+        const isActive = selectedProvider === provider;
+        const label = providerName(provider);
+
+        return (
+          <Pill
             key={provider}
-            type="button"
-            aria-pressed={selectedProvider === provider}
-            onClick={() => {
-              onProviderChange(provider);
-              detailsRef.current?.removeAttribute('open');
-            }}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent"
+            isActive={isActive}
+            onClick={() => onProviderChange(provider)}
+            role="radio"
+            aria-checked={isActive}
+            aria-label={label}
+            title={label}
+            className={cn(
+              'justify-center gap-1.5 py-1.5 text-xs',
+              isActive ? 'min-w-0 flex-1 px-2' : 'w-9 px-0',
+            )}
           >
-            <LLMProviderLogo provider={provider} className="h-4 w-4" />
-            <span className="flex-1">{providerName(provider)}</span>
-            {selectedProvider === provider && <Check className="h-4 w-4 text-primary" />}
-          </button>
-        ))}
-      </div>
-    </details>
+            <LLMProviderLogo provider={provider} className="h-3.5 w-3.5 shrink-0" />
+            {isActive && <span className="truncate">{label}</span>}
+          </Pill>
+        );
+      })}
+    </PillBar>
   );
 }

@@ -206,6 +206,7 @@ export type GatewayEventKind =
   | 'session_upserted'
   | 'session_activity'
   | 'loading_progress'
+  | 'scheduled_messages_updated'
   | 'protocol_error';
 
 /**

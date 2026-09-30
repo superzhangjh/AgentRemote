@@ -21,9 +21,29 @@ type WebSocketContextType = {
    */
   subscribe: (listener: ServerEventListener) => () => void;
   isConnected: boolean;
+  /**
+   * Forces the current socket to close so the reconnect path runs.
+   *
+   * Used by the connection indicator's retry action: a user who sees "已断开"
+   * wants an immediate attempt, not a wait for the next scheduled retry.
+   */
+  reconnect: () => void;
 };
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
+
+/**
+ * Liveness probe cadence and the idle window that means the socket is dead.
+ *
+ * The browser answers the socket layer's ping without running JavaScript, so a
+ * frozen page cannot tell "nothing to say" from "the connection died while the
+ * app was in the background" — it only finds out when a send happens to fail.
+ * Sending our own ping and expecting a reply within the window turns that into
+ * a decision: close the socket and let the normal reconnect (which re-subscribes
+ * and refreshes history) take over.
+ */
+const LIVENESS_PROBE_INTERVAL_MS = 25_000;
+const LIVENESS_TIMEOUT_MS = 45_000;
 
 export const useWebSocket = () => {
   const context = useContext(WebSocketContext);
@@ -56,6 +76,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const listenersRef = useRef(new Set<ServerEventListener>());
   const [isConnected, setIsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  /** When the last frame arrived; only a received frame proves the socket is alive. */
+  const lastFrameAtRef = useRef(0);
+  const livenessTimerRef = useRef<NodeJS.Timeout | null>(null);
   const { isLoading: isAuthLoading, token, user } = useAuth();
 
   const dispatch = useCallback((event: ServerEvent) => {
@@ -84,16 +107,48 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       // their handshake completes with stale credentials.
       wsRef.current = websocket;
 
+      const stopLivenessProbe = () => {
+        if (livenessTimerRef.current) {
+          clearInterval(livenessTimerRef.current);
+          livenessTimerRef.current = null;
+        }
+      };
+
       websocket.onopen = () => {
         setIsConnected(true);
+        lastFrameAtRef.current = Date.now();
         if (hasConnectedRef.current) {
           // This is a reconnect — signal so components can catch up on missed messages
           dispatch({ kind: 'websocket_reconnected', timestamp: Date.now() });
         }
         hasConnectedRef.current = true;
+
+        stopLivenessProbe();
+        livenessTimerRef.current = setInterval(() => {
+          if (websocket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+
+          const idleMs = Date.now() - lastFrameAtRef.current;
+          if (idleMs > LIVENESS_TIMEOUT_MS) {
+            console.warn(
+              `[WS] No frame for ${Math.round(idleMs / 1000)}s; reconnecting to resubscribe and refresh history`,
+            );
+            stopLivenessProbe();
+            websocket.close();
+            return;
+          }
+
+          try {
+            websocket.send(JSON.stringify({ type: 'ping' }));
+          } catch {
+            // The close handler schedules the reconnect; nothing to do here.
+          }
+        }, LIVENESS_PROBE_INTERVAL_MS);
       };
 
       websocket.onmessage = (event) => {
+        lastFrameAtRef.current = Date.now();
         try {
           const data = JSON.parse(event.data) as ServerEvent;
           dispatch(data);
@@ -103,6 +158,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       };
 
       websocket.onclose = () => {
+        stopLivenessProbe();
         if (wsRef.current !== websocket) {
           return;
         }
@@ -144,6 +200,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
+      if (livenessTimerRef.current) {
+        clearInterval(livenessTimerRef.current);
+        livenessTimerRef.current = null;
+      }
       const activeSocket = wsRef.current;
       if (activeSocket) {
         // Prevent the intentionally closed, old-token socket from scheduling
@@ -174,13 +234,31 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     };
   }, []);
 
+  const reconnect = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    const socket = wsRef.current;
+    if (!socket || socket.readyState === WebSocket.CLOSED) {
+      // Nothing to close: either the retry timer is running or the provider is
+      // unmounted. Ask for a fresh connection directly.
+      connect();
+      return;
+    }
+
+    socket.close();
+  }, [connect]);
+
   const value: WebSocketContextType = useMemo(() =>
   ({
     ws: wsRef.current,
     sendMessage,
     subscribe,
-    isConnected
-  }), [sendMessage, subscribe, isConnected]);
+    isConnected,
+    reconnect,
+  }), [reconnect, sendMessage, subscribe, isConnected]);
 
   return value;
 };

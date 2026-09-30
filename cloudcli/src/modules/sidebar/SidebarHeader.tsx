@@ -7,6 +7,7 @@ import { IS_PLATFORM,cn } from '@/shared/utils';
 import type { LLMProvider, SidebarSearchMode } from '@/shared/types';
 import GitHubStarBadge from '@/modules/sidebar/GitHubStarBadge';
 import SidebarAgentSelector from '@/modules/sidebar/SidebarAgentSelector';
+import ConnectionStatusPill from '@/modules/sidebar/ConnectionStatusPill';
 
 const MOD_KEY =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
@@ -135,6 +136,8 @@ export default function SidebarHeader({
         </div>
 
         <GitHubStarBadge />
+
+        <ConnectionStatusPill className="mt-2.5" />
 
         <SidebarAgentSelector selectedProvider={selectedProvider} onProviderChange={onProviderChange} />
 
@@ -265,6 +268,8 @@ export default function SidebarHeader({
             </button>
           </div>
         </div>
+
+        <ConnectionStatusPill className="mt-2.5" compact />
 
         <SidebarAgentSelector selectedProvider={selectedProvider} onProviderChange={onProviderChange} />
 

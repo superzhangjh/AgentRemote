@@ -122,6 +122,8 @@
     "newFolder": "New Folder (Cmd+Shift+N)",
     "refresh": "Refresh",
     "collapseAll": "Collapse All",
+    "showIgnoredFiles": "Show files excluded by .gitignore",
+    "hideIgnoredFiles": "Hide files excluded by .gitignore",
     "context": {
       "rename": "Rename",
       "delete": "Delete",
@@ -357,5 +359,18 @@
     "closeLoginModal": "Close login modal",
     "pluginLoadFailed": "Plugin failed to load: {{error}}"
   },
-  "cancel": "Cancel"
+  "cancel": "Cancel",
+  "connection": {
+    "connected": "Connected",
+    "connecting": "Connecting…",
+    "offline": "Network offline",
+    "connectedHint": "Realtime connection healthy",
+    "serverVersion": "Server version",
+    "latency": "Latency",
+    "deviceOffline": "This device has no network connection",
+    "retryHint": "Tap to reconnect now",
+    "retry": "Retry",
+    "offlineBanner": "Connection to the server was lost",
+    "connectingBanner": "Reconnecting to the server…"
+  }
 }

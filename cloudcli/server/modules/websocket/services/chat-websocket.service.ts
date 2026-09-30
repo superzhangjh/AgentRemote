@@ -634,6 +634,14 @@ export function handleChatConnection(
       const messageType = typeof data.type === 'string' ? data.type : '';
 
       switch (messageType) {
+        case 'ping':
+          // Application-level liveness check. The server's own ping/pong is at
+          // the socket layer, where the browser answers it without JavaScript,
+          // so a client whose page was frozen cannot tell a healthy idle
+          // connection from a half-open one. The client uses this reply to
+          // decide whether to force a reconnect (and with it a re-subscribe).
+          ws.send(JSON.stringify({ kind: 'pong', timestamp: Date.now() }));
+          return;
         case 'chat.edit-send':
           await handleChatEditSend(ws, userId, data, dependencies);
           return;

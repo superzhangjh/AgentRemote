@@ -18,3 +18,6 @@ export { broadcastSessionUpserted, broadcastSessionUpsertedBatch } from './servi
 // from a timer, with no socket to stream to or report errors on.
 export { runDetachedChatTurn } from './services/chat-websocket.service.js';
 export type { ProviderRuntimeGateway } from './services/chat-websocket.service.js';
+// Consumed by the scheduled-messages module so every client watching a session
+// sees it scheduled, cancelled, sent or failed without reopening the session.
+export { broadcastScheduledMessagesUpdated } from './services/scheduled-messages-broadcast.service.js';

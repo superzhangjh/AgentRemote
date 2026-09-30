@@ -121,6 +121,8 @@
     "newFolder": "新建文件夹 (Cmd+Shift+N)",
     "refresh": "刷新",
     "collapseAll": "全部折叠",
+    "showIgnoredFiles": "显示被 .gitignore 忽略的文件",
+    "hideIgnoredFiles": "隐藏被 .gitignore 忽略的文件",
     "context": {
       "rename": "重命名",
       "delete": "删除",
@@ -274,5 +276,18 @@
       "updateAvailable": "有可用更新",
       "closeSidebar": "关闭侧边栏"
     }
+  },
+  "connection": {
+    "connected": "已连接",
+    "connecting": "连接中…",
+    "offline": "网络已断开",
+    "connectedHint": "实时连接正常",
+    "serverVersion": "服务版本",
+    "latency": "延迟",
+    "deviceOffline": "设备当前没有网络连接",
+    "retryHint": "点击立即重连",
+    "retry": "重试",
+    "offlineBanner": "与服务器的连接已断开",
+    "connectingBanner": "正在重新连接服务器…"
   }
 }

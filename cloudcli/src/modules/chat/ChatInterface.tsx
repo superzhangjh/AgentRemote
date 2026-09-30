@@ -273,6 +273,36 @@ function ChatInterface({
     });
   }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);
 
+  // The socket's own reconnect event only fires when the connection actually
+  // dropped. A WebView that was merely frozen comes back with a live socket
+  // and a transcript that is minutes behind — including permission prompts
+  // that were raised and maybe answered elsewhere while it was hidden. Run the
+  // same bounded tail sync and re-subscribe on resume, throttled because the
+  // shell event, `focus` and `visibilitychange` arrive together.
+  const lastResumeCatchUpRef = useRef(0);
+  useEffect(() => {
+    const catchUp = () => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      const now = Date.now();
+      if (now - lastResumeCatchUpRef.current < 5_000) {
+        return;
+      }
+      lastResumeCatchUpRef.current = now;
+      void handleWebSocketReconnect();
+    };
+
+    document.addEventListener('visibilitychange', catchUp);
+    window.addEventListener('focus', catchUp);
+    window.addEventListener('agentremote:resume', catchUp);
+    return () => {
+      document.removeEventListener('visibilitychange', catchUp);
+      window.removeEventListener('focus', catchUp);
+      window.removeEventListener('agentremote:resume', catchUp);
+    };
+  }, [handleWebSocketReconnect]);
+
   useChatRealtimeHandlers({
     isActive,
     subscribe,
@@ -341,8 +371,41 @@ function ChatInterface({
     }
   }, [onNavigateToSession, selectedSession?.id]);
 
-  const { scheduledMessages, schedule: scheduleMessage, cancel: cancelScheduledMessage } =
+  const { scheduledMessages, schedule: scheduleMessage, cancel: cancelScheduledMessage, refresh: refreshScheduledMessages } =
     useScheduledMessages(currentSessionId || selectedSession?.id || null);
+
+  // The schedule lives on the server, so another client may have created,
+  // cancelled, sent or failed one for this session while it was open here.
+  // Refetch the list on the announcement rather than trying to patch it in
+  // place: the delta carries no row state, only "this session's list changed".
+  const scheduledMessagesSessionId = currentSessionId || selectedSession?.id || null;
+  useEffect(() => {
+    if (!scheduledMessagesSessionId) {
+      return undefined;
+    }
+
+    return subscribe((event) => {
+      if (event.kind !== 'scheduled_messages_updated') return;
+      if (event.sessionId !== scheduledMessagesSessionId) return;
+      void refreshScheduledMessages();
+    });
+  }, [refreshScheduledMessages, scheduledMessagesSessionId, subscribe]);
+
+  // A suspended WebView misses the announcement entirely, so catch up when the
+  // view becomes visible again instead of leaving a stale banner on screen.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshScheduledMessages();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [refreshScheduledMessages]);
 
   /**
    * Hands the composer's current text to the server to send later, and clears

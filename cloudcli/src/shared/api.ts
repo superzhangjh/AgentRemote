@@ -262,8 +262,11 @@ export const api = {
     get(fileContentPath(projectId, filePath), options),
   saveFile: (projectId: string, filePath: string, content: string) =>
     put(`/api/file-tree/projects/${projectId}/file`, { filePath, content }),
-  getFiles: (projectId: string, options: ApiRequestOptions = {}) =>
-    get(`/api/file-tree/projects/${projectId}/files${query({ respectGitignore: true })}`, options),
+  getFiles: (projectId: string, { respectGitignore = true, ...options }: ApiRequestOptions & { respectGitignore?: boolean } = {}) =>
+    // Sent explicitly, not through `query`: that helper drops `false`, which
+    // would silently mean "hide ignored files" no matter what the caller asked
+    // for. The server compares against the string 'true'.
+    get(`/api/file-tree/projects/${projectId}/files?respectGitignore=${respectGitignore ? 'true' : 'false'}`, options),
 
   // File operations
   createFile: (

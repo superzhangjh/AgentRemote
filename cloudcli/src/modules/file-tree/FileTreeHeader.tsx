@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import type { ChangeEvent } from 'react';
-import { ChevronDown, Eye, FileText, FolderPlus, List, Loader2, RefreshCw, Search, TableProperties, Upload, X } from 'lucide-react';
+import { ChevronDown, Eye, EyeOff, FileText, FolderPlus, List, Loader2, RefreshCw, Search, TableProperties, Upload, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button, Input } from '@/shared/ui';
@@ -19,6 +19,9 @@ type FileTreeHeaderProps = {
   onUploadFiles?: (files: FileList) => void;
   onRefresh?: () => void;
   onCollapseAll?: () => void;
+  /** Whether entries excluded by `.gitignore` are hidden; the toggle next to Refresh flips it. */
+  respectGitignore?: boolean;
+  onRespectGitignoreChange?: (respectGitignore: boolean) => void;
   // Loading state
   loading?: boolean;
   operationLoading?: boolean;
@@ -37,6 +40,8 @@ export default function FileTreeHeader({
   onUploadFiles,
   onRefresh,
   onCollapseAll,
+  respectGitignore = true,
+  onRespectGitignoreChange,
   loading,
   operationLoading,
   isUploading,
@@ -153,6 +158,31 @@ export default function FileTreeHeader({
               aria-label={t('fileTree.collapseAll', 'Collapse All')}
             >
               <ChevronDown className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {onRespectGitignoreChange && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn('h-7 w-7 p-0', !respectGitignore && 'text-foreground')}
+              onClick={() => onRespectGitignoreChange(!respectGitignore)}
+              title={
+                respectGitignore
+                  ? t('fileTree.showIgnoredFiles', 'Show files excluded by .gitignore')
+                  : t('fileTree.hideIgnoredFiles', 'Hide files excluded by .gitignore')
+              }
+              aria-label={
+                respectGitignore
+                  ? t('fileTree.showIgnoredFiles', 'Show files excluded by .gitignore')
+                  : t('fileTree.hideIgnoredFiles', 'Hide files excluded by .gitignore')
+              }
+              aria-pressed={!respectGitignore}
+            >
+              {respectGitignore ? (
+                <EyeOff className="h-3.5 w-3.5" />
+              ) : (
+                <Eye className="h-3.5 w-3.5" />
+              )}
             </Button>
           )}
           {/* Divider */}

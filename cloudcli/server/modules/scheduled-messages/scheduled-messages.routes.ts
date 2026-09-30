@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
+import { broadcastScheduledMessagesUpdated } from '@/modules/websocket/index.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
 
 type AuthenticatedRequest = Request & { user?: { id?: number | string } };
@@ -53,6 +54,7 @@ router.post(
       options: body.options,
       scheduledFor: readString(body.scheduledFor, 'scheduledFor'),
     });
+    broadcastScheduledMessagesUpdated(result.sessionId);
     res.status(201).json(createApiSuccessResponse(result));
   }),
 );
@@ -60,7 +62,8 @@ router.post(
 router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
-    scheduledMessagesService.cancel(readUserId(req), readString(req.params.id, 'id'));
+    const sessionId = scheduledMessagesService.cancel(readUserId(req), readString(req.params.id, 'id'));
+    broadcastScheduledMessagesUpdated(sessionId);
     res.json(createApiSuccessResponse({ cancelled: true }));
   }),
 );

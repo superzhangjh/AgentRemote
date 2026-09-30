@@ -864,6 +864,7 @@ export function useProjectsState({
         && event.kind !== 'loading_progress'
         && event.kind !== 'session_upserted'
         && event.kind !== 'session_activity'
+        && event.kind !== 'scheduled_messages_updated'
         && event.kind !== 'status'
         && event.kind !== 'stream_end'
         && event.kind !== 'permission_resolved'

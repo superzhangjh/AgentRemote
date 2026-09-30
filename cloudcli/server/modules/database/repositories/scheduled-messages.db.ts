@@ -67,6 +67,14 @@ export const scheduledMessagesDb = {
       .all(userId) as ScheduledMessageRow[];
   },
 
+  /** One row by id, used to resolve which session a cancellation belongs to. */
+  getById(id: string): ScheduledMessageRow | null {
+    const row = getConnection()
+      .prepare(`SELECT ${COLUMNS} FROM scheduled_messages WHERE id = ?`)
+      .get(id) as ScheduledMessageRow | undefined;
+    return row ?? null;
+  },
+
   /**
    * Claims every message whose time has passed, marking them in the same
    * statement that selects them.

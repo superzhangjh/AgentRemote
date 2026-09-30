@@ -109,13 +109,28 @@ export const scheduledMessagesService = {
     return scheduledMessagesDb.listPendingForUser(userId).map(toScheduledMessage);
   },
 
-  /** Cancels a pending message, or dismisses a failed one. */
-  cancel(userId: number, id: string): void {
+  /**
+   * Cancels a pending message, or dismisses a failed one.
+   *
+   * Returns the session it belonged to so callers can tell every client
+   * watching that session to drop the banner.
+   */
+  cancel(userId: number, id: string): string {
+    const existing = scheduledMessagesDb.getById(id);
+    if (!existing || existing.user_id !== userId || (existing.status !== 'pending' && existing.status !== 'failed')) {
+      throw new AppError('That message has already been sent or cancelled.', {
+        code: 'SCHEDULED_MESSAGE_NOT_PENDING',
+        statusCode: 409,
+      });
+    }
+
     if (!scheduledMessagesDb.cancel(userId, id)) {
       throw new AppError('That message has already been sent or cancelled.', {
         code: 'SCHEDULED_MESSAGE_NOT_PENDING',
         statusCode: 409,
       });
     }
+
+    return existing.session_id;
   },
 };

@@ -8,6 +8,7 @@ import { ICON_SIZE_CLASS, getFileIconData } from '@/modules/file-tree/utils/file
 import { useExpandedDirectories } from '@/modules/file-tree/hooks/useExpandedDirectories';
 import { useFileTreeData } from '@/modules/file-tree/hooks/useFileTreeData';
 import { useFileTreeOperations } from '@/modules/file-tree/hooks/useFileTreeOperations';
+import { useFileTreeRespectGitignore } from '@/modules/file-tree/hooks/useFileTreeRespectGitignore';
 import { useFileTreeSearch } from '@/modules/file-tree/hooks/useFileTreeSearch';
 import { useFileTreeViewMode } from '@/modules/file-tree/hooks/useFileTreeViewMode';
 import { useFileTreeUpload } from '@/modules/file-tree/hooks/useFileTreeUpload';
@@ -50,7 +51,8 @@ export default function FileTree({ selectedProject, onFileOpen }: FileTreeProps)
     }
   }, [toast]);
 
-  const { files, loading, error, refreshFiles } = useFileTreeData(selectedProject);
+  const { respectGitignore, changeRespectGitignore } = useFileTreeRespectGitignore();
+  const { files, loading, error, refreshFiles } = useFileTreeData(selectedProject, respectGitignore);
   const { viewMode, changeViewMode } = useFileTreeViewMode();
   const { expandedDirs, toggleDirectory, expandDirectories, collapseAll } = useExpandedDirectories();
   const { searchQuery, setSearchQuery, filteredFiles } = useFileTreeSearch({
@@ -197,6 +199,8 @@ export default function FileTree({ selectedProject, onFileOpen }: FileTreeProps)
         onNewFolder={() => operations.handleStartCreate('', 'directory')}
         onRefresh={refreshFiles}
         onCollapseAll={collapseAll}
+        respectGitignore={respectGitignore}
+        onRespectGitignoreChange={changeRespectGitignore}
         loading={loading}
         operationLoading={operationLoading}
         isUploading={upload.uploadProgress?.status === 'uploading'}

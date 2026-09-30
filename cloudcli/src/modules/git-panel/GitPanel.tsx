@@ -1,6 +1,7 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useWebSocket } from '@/shared/context/WebSocketContext';
 import { useGitPanelController } from '@/modules/git-panel/hooks/useGitPanelController';
 import { useRevertLocalCommit } from '@/modules/git-panel/hooks/useRevertLocalCommit';
 import type { ConfirmationRequest, FileOpenHandler, GitPanelView, Project } from '@/shared/types';
@@ -88,6 +89,64 @@ export default function GitPanel({
     projectId: selectedProject?.projectId ?? null,
     onSuccess: refreshAll,
   });
+
+  const { subscribe } = useWebSocket();
+
+  /**
+   * The working tree changes while this panel is open and the change does not
+   * originate here: an agent turn edits files, a terminal command commits, the
+   * CLI or another device discards something. The controller only fetches on
+   * project change, so without these triggers the Changes tab keeps showing
+   * whatever was on disk when it was opened.
+   *
+   * Two triggers, one debounced refresh: `complete` (once per finished turn,
+   * right after that turn's edits) and a slow poll for edits that no CloudCLI
+   * turn caused. The debounce keeps a burst of completions from stacking
+   * git status/branch/remote requests.
+   */
+  const lastAutoRefreshRef = useRef(0);
+  const refreshAfterExternalChange = useCallback(() => {
+    const now = Date.now();
+    if (now - lastAutoRefreshRef.current < 2_000) {
+      return;
+    }
+    lastAutoRefreshRef.current = now;
+    refreshAll();
+  }, [refreshAll]);
+
+  useEffect(() => {
+    if (!selectedProject) {
+      return undefined;
+    }
+
+    return subscribe((event) => {
+      if (event.kind !== 'complete') {
+        return;
+      }
+      refreshAfterExternalChange();
+    });
+  }, [refreshAfterExternalChange, selectedProject, subscribe]);
+
+  useEffect(() => {
+    if (!selectedProject) {
+      return undefined;
+    }
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refreshAfterExternalChange();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    const interval = window.setInterval(onVisible, 15_000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+      window.clearInterval(interval);
+    };
+  }, [refreshAfterExternalChange, selectedProject]);
 
   const executeConfirmedAction = useCallback(async (useAlternateConfirmation = false) => {
     if (!confirmAction) return;

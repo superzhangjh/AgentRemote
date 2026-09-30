@@ -1,6 +1,6 @@
 import { scheduledMessagesDb, sessionDraftsDb } from '@/modules/database/index.js';
 import type { QueuedSessionMessageRecord, ScheduledMessageRow } from '@/modules/database/index.js';
-import { chatRunRegistry, runDetachedChatTurn } from '@/modules/websocket/index.js';
+import { chatRunRegistry, runDetachedChatTurn, broadcastScheduledMessagesUpdated } from '@/modules/websocket/index.js';
 import type { ProviderRuntimeGateway } from '@/modules/websocket/index.js';
 
 /**
@@ -129,6 +129,11 @@ async function sendClaimedMessage(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     scheduledMessagesDb.markFailed(row.id, message);
+  } finally {
+    // `sent` is written when the row is claimed, so the list changed before the
+    // run started; the same goes for a failure. Either way every client
+    // watching the session has to stop showing the banner as pending.
+    broadcastScheduledMessagesUpdated(row.session_id);
   }
 }
 
