@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { ConfirmationRequest, GitRemoteStatus } from '@/shared/types';
 import NewBranchModal from '@/modules/git-panel/modals/NewBranchModal';
+import { describeGitError } from '@/modules/git-panel/utils/gitErrorHints';
 
 type GitPanelHeaderProps = {
   isMobile: boolean;
@@ -309,7 +310,9 @@ export default function GitPanelHeader({
       {operationError && (
         <div className="flex items-start gap-2 border-b border-destructive/20 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span className="flex-1 leading-snug">{operationError}</span>
+          <span className="flex-1 whitespace-pre-line leading-snug">
+            {describeGitError(operationError, t)}
+          </span>
           <button
             onClick={onClearError}
             className="shrink-0 rounded p-0.5 hover:bg-destructive/20"

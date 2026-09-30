@@ -226,5 +226,10 @@
     "explainerTitle": "Work on branches in parallel",
     "explainerDescription": "A worktree checks out a branch in its own folder, so you can run separate chat sessions side by side and merge the results back when they're ready.",
     "createFirst": "Create your first worktree"
+  },
+  "errors": {
+    "sshBlockedHint": "Hint: the SSH connection to GitHub (port 22) was cut. If this keeps failing, check your network or proxy, or switch the remote to HTTPS and configure a GitHub token under Settings → API & Tokens.",
+    "sshAuthHint": "Hint: the remote rejected this machine's SSH key. Add the public key to GitHub, or switch to HTTPS with a GitHub token under Settings → API & Tokens.",
+    "dnsHint": "Hint: the remote host could not be resolved. Check this machine's network or proxy settings."
   }
 }

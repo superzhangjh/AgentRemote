@@ -1,11 +1,11 @@
-import { memo, useEffect, useRef } from 'react';
-import { Check, ChevronDown, ChevronRight, Edit3, Star, Trash2, X } from 'lucide-react';
+import { memo, useEffect, useRef, useState } from 'react';
+import { Check, ChevronDown, ChevronRight, Edit3, MoreHorizontal, Star, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
-import { Button } from '@/shared/ui';
+import { Button, Dialog, DialogContent, DialogTitle } from '@/shared/ui';
 import { cn } from '@/shared/utils';
 import type { LLMProvider, MCPServerStatus, Project, ProjectSession, SessionWithProvider } from '@/shared/types';
-import { getTaskIndicatorStatus } from '@/modules/sidebar/utils/sidebarProjectFormatting';
+import { getProjectLastActivityLabel, getTaskIndicatorStatus } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import TaskIndicator from '@/modules/sidebar/TaskIndicator';
 import SidebarProjectSessions from '@/modules/sidebar/SidebarProjectSessions';
 import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
@@ -98,9 +98,14 @@ function SidebarProjectItem({
   const isSelected = selectedProject?.projectId === project.projectId;
   const totalSessionCount = Number(project.sessionMeta?.total ?? sessions.length);
   const sessionCountDisplay = getSessionCountDisplay(project, sessions);
-  const sessionCountLabel = `${sessionCountDisplay} session${totalSessionCount === 1 ? '' : 's'}`;
+  const sessionCountLabel = t('projects.sessionCount', {
+    count: totalSessionCount,
+    defaultValue: '{{count}} sessions',
+  });
+  const lastActivityLabel = getProjectLastActivityLabel(project, currentTime);
   const taskStatus = getTaskIndicatorStatus(project, mcpServerStatus);
   const mobileRenameInputRef = useRef<HTMLInputElement>(null);
+  const [isMobileOptionsOpen, setIsMobileOptionsOpen] = useState(false);
 
   useEffect(() => {
     if (!isEditing || !mobileRenameInputRef.current) {
@@ -216,11 +221,14 @@ function SidebarProjectItem({
                           <TaskIndicator
                             status={taskStatus}
                             size="xs"
-                            className="ml-2 hidden flex-shrink-0 md:inline-flex"
+                            className="ml-2 flex-shrink-0"
                           />
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground">{sessionCountLabel}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {sessionCountLabel}
+                        {lastActivityLabel && <span className="ml-1 opacity-70">· {lastActivityLabel}</span>}
+                      </p>
                     </>
                   )}
                 </div>
@@ -251,23 +259,17 @@ function SidebarProjectItem({
                 ) : (
                   <>
                     <button
-                      className="flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 bg-red-500/10 active:scale-90 dark:border-red-800 dark:bg-red-900/30"
+                      type="button"
+                      aria-label={t('projects.projectOptions', { defaultValue: 'Project options' })}
+                      aria-haspopup="dialog"
+                      aria-expanded={isMobileOptionsOpen}
+                      className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors active:scale-95 active:bg-muted"
                       onClick={(event) => {
                         event.stopPropagation();
-                        onDeleteProject(project);
+                        setIsMobileOptionsOpen(true);
                       }}
                     >
-                      <Trash2 className="h-4 w-4 text-red-600 dark:text-red-400" />
-                    </button>
-
-                    <button
-                      className="flex h-8 w-8 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 active:scale-90 dark:border-primary/30 dark:bg-primary/20"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onStartEditingProject(project);
-                      }}
-                    >
-                      <Edit3 className="h-4 w-4 text-primary" />
+                      <MoreHorizontal className="h-4 w-4" />
                     </button>
 
                     <div className="flex h-6 w-6 items-center justify-center rounded-md bg-muted/30">
@@ -282,6 +284,54 @@ function SidebarProjectItem({
               </div>
             </div>
           </div>
+
+          <Dialog open={isMobileOptionsOpen} onOpenChange={setIsMobileOptionsOpen}>
+            <DialogContent
+              animationClassName="animate-bottom-sheet-content-show motion-reduce:animate-none"
+              className="bottom-0 left-0 top-auto max-w-none translate-x-0 translate-y-0 rounded-b-none rounded-t-2xl border-x-0 border-b-0 px-4 pb-safe-area-inset-bottom pt-3"
+            >
+              <DialogTitle>{project.displayName}</DialogTitle>
+              <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-muted-foreground/30" aria-hidden="true" />
+
+              <p className="mb-4 truncate px-1 text-xs text-muted-foreground" title={project.fullPath}>
+                {project.fullPath}
+              </p>
+
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileOptionsOpen(false);
+                    onStartEditingProject(project);
+                  }}
+                  className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
+                >
+                  <Edit3 className="h-5 w-5 flex-shrink-0" />
+                  <span className="text-sm font-medium">{t('projects.renameProject')}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileOptionsOpen(false);
+                    onDeleteProject(project);
+                  }}
+                  className="flex min-h-12 w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-red-600 transition-colors active:bg-red-500/10 dark:text-red-400"
+                >
+                  <Trash2 className="h-5 w-5 flex-shrink-0" />
+                  <span className="text-sm font-medium">{t('projects.deleteProject')}</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsMobileOptionsOpen(false)}
+                className="mb-3 mt-2 min-h-11 w-full rounded-xl text-sm font-medium text-muted-foreground transition-colors active:bg-muted"
+              >
+                {t('common.cancel', { defaultValue: 'Cancel' })}
+              </button>
+            </DialogContent>
+          </Dialog>
         </div>
         )}
 
@@ -348,8 +398,9 @@ function SidebarProjectItem({
                   <div className="truncate text-sm font-normal text-foreground" title={project.displayName}>
                     {project.displayName}
                   </div>
-                  <div className="text-xs text-muted-foreground">
+                  <div className="truncate text-xs text-muted-foreground">
                     {sessionCountDisplay}
+                    {lastActivityLabel && <span className="ml-1 opacity-70">· {lastActivityLabel}</span>}
                     {project.fullPath !== project.displayName && (
                       <span className="ml-1 opacity-60" title={project.fullPath}>
                         {' - '}

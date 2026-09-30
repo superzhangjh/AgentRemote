@@ -106,7 +106,7 @@ export const getAllSessions = (project: Project): SessionWithProvider[] => {
   return sessions;
 };
 
-const getProjectLastActivity = (project: Project): Date => {
+export const getProjectLastActivity = (project: Project): Date => {
   const sessions = getAllSessions(project);
   if (sessions.length === 0) {
     return new Date(0);
@@ -116,6 +116,22 @@ const getProjectLastActivity = (project: Project): Date => {
     const sessionDate = getSessionDate(session);
     return sessionDate > latest ? sessionDate : latest;
   }, new Date(0));
+};
+
+/**
+ * Compact age of a project's newest session ("12m", "3hr", "2d"), or '' when
+ * nothing has happened yet.
+ *
+ * The sidebar sorts projects by recent activity, so the same number that
+ * produces the order is the one worth showing on the row.
+ */
+export const getProjectLastActivityLabel = (project: Project, currentTime: Date): string => {
+  const lastActivity = getProjectLastActivity(project);
+  if (lastActivity.getTime() <= 0) {
+    return '';
+  }
+
+  return formatCompactAge(lastActivity.toISOString(), currentTime);
 };
 
 export const sortProjects = (

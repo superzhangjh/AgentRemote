@@ -1,0 +1,7 @@
+{
+  "errors": {
+    "sshBlockedHint": "提示：到 GitHub 的 SSH 连接（22 端口）被中断。如果一直失败，请检查网络或代理，或把远程地址改成 HTTPS 并在「设置 → API 和令牌」中配置 GitHub Token。",
+    "sshAuthHint": "提示：远端拒绝了 SSH 密钥。请确认已把本机公钥添加到 GitHub，或改用 HTTPS + GitHub Token（「设置 → API 和令牌」）。",
+    "dnsHint": "提示：无法解析远端主机，请检查本机网络或代理设置。"
+  }
+}

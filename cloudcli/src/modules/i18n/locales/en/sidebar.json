@@ -17,7 +17,9 @@
     "projects": "projects",
     "noMatchingProjects": "No matching projects",
     "tryDifferentSearch": "Try adjusting your search term",
-    "runClaudeCli": "Run Claude CLI in a project directory to get started"
+    "runClaudeCli": "Run Claude CLI in a project directory to get started",
+    "sessionCount": "{{count}} sessions",
+    "projectOptions": "Project options"
   },
   "app": {
     "title": "Agent 遥控台",
