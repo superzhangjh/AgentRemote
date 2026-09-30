@@ -17,18 +17,17 @@ const providerName = (provider: LLMProvider) =>
 /**
  * Switches which Agent the unified project and conversation tree shows.
  *
- * A segmented bar rather than the previous dropdown: with four agents the whole
- * set fits, the active one is always readable without opening anything, and
- * switching costs one tap instead of two. The inactive segments are logo-only
- * so four of them fit the sidebar width without truncating a name; the active
- * segment carries its label, which is also the one the user is reading.
+ * Icon-only segments that share their row with the list-view tabs: four logos
+ * fit beside them without either group wrapping, the active segment keeps the
+ * raised pill styling, and each segment carries the agent name as its tooltip
+ * and aria-label.
  */
 export default function SidebarAgentSelector({ selectedProvider, onProviderChange }: SidebarAgentSelectorProps) {
   const { t } = useTranslation('sidebar');
 
   return (
     <PillBar
-      className="mt-2 w-full"
+      className="min-w-0"
       role="radiogroup"
       aria-label={t('agentSelector.label', 'Agent')}
     >
@@ -45,13 +44,9 @@ export default function SidebarAgentSelector({ selectedProvider, onProviderChang
             aria-checked={isActive}
             aria-label={label}
             title={label}
-            className={cn(
-              'justify-center gap-1.5 py-1.5 text-xs',
-              isActive ? 'min-w-0 flex-1 px-2' : 'w-9 px-0',
-            )}
+            className={cn('h-7 w-8 shrink-0 justify-center px-0 py-0')}
           >
-            <LLMProviderLogo provider={provider} className="h-3.5 w-3.5 shrink-0" />
-            {isActive && <span className="truncate">{label}</span>}
+            <LLMProviderLogo provider={provider} className="h-4 w-4 shrink-0" />
           </Pill>
         );
       })}

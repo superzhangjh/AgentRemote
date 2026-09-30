@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { Check, ChevronRight, Edit3, Folder, Loader2, MessageSquarePlus, MoreHorizontal, Star, Trash2, X } from 'lucide-react';
+import { Check, Edit3, Folder, Loader2, MoreHorizontal, Pin, SquarePen, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Dialog, DialogContent, DialogTitle } from '@/shared/ui';
@@ -145,19 +145,14 @@ function SidebarProjectItem({
 
   const isCompact = useCompactSidebar();
 
+  // Clicking a project row only expands it: the workspace follows the session
+  // the user opens (or the new session they start), never a bare project click,
+  // which used to clear the open session underneath them.
   const toggleProject = () => onToggleProject(project.projectId);
   const toggleStarProject = () => onToggleStarProject(project.projectId);
 
   const saveProjectName = () => {
     onSaveProjectName(project.projectId, renameDraft);
-  };
-
-  const selectAndToggleProject = () => {
-    if (selectedProject?.projectId !== project.projectId) {
-      onProjectSelect(project);
-    }
-
-    toggleProject();
   };
 
   const startNewSession = () => {
@@ -173,23 +168,29 @@ function SidebarProjectItem({
   );
 
   return (
-    <div className={cn('group/project', isDeleting && 'opacity-50 pointer-events-none')}>
+    <div className={cn(isDeleting && 'opacity-50 pointer-events-none')}>
       <div
         role="button"
         tabIndex={0}
-        onClick={isEditing ? undefined : selectAndToggleProject}
+        onClick={isEditing ? undefined : toggleProject}
         onKeyDown={(event) => {
           if (isEditing) return;
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
-            selectAndToggleProject();
+            toggleProject();
           }
         }}
         title={isEditing ? undefined : rowTitle}
         className={cn(
           'mx-2 flex cursor-pointer select-none items-center gap-2 rounded-lg transition-colors',
           isCompact ? 'px-2 py-2' : 'px-2 py-1.5',
-          isSelected ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40',
+          isSelected
+            ? 'bg-accent text-accent-foreground'
+            : isStarred
+              // Pinned rows are readable as pinned from the list itself; the
+              // pin toggle lives in the options menu, next to rename/remove.
+              ? 'bg-amber-500/10 text-foreground hover:bg-amber-500/15'
+              : 'hover:bg-accent/40',
         )}
       >
         <Folder className="h-4 w-4 shrink-0 text-muted-foreground/80" />
@@ -265,20 +266,15 @@ function SidebarProjectItem({
 
             <button
               type="button"
-              aria-label={isStarred ? t('tooltips.removeFromFavorites') : t('tooltips.addToFavorites')}
-              aria-pressed={isStarred}
-              className={cn(
-                iconButtonClass,
-                isStarred
-                  ? 'text-yellow-600 opacity-100 hover:text-yellow-700 dark:text-yellow-400'
-                  : 'opacity-0 group-hover/project:opacity-100',
-              )}
+              aria-label={t('sessions.newSession')}
+              title={t('sessions.newSession')}
+              className={cn(iconButtonClass, 'text-foreground')}
               onClick={(event) => {
                 event.stopPropagation();
-                toggleStarProject();
+                startNewSession();
               }}
             >
-              <Star className={cn('h-3.5 w-3.5', isStarred && 'fill-current')} />
+              <SquarePen className="h-4 w-4" />
             </button>
 
             <button
@@ -294,25 +290,6 @@ function SidebarProjectItem({
             >
               <MoreHorizontal className="h-4 w-4" />
             </button>
-
-            {isExpanded ? (
-              <button
-                type="button"
-                aria-label={t('sessions.newSession')}
-                title={t('sessions.newSession')}
-                className={cn(iconButtonClass, 'text-foreground')}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  startNewSession();
-                }}
-              >
-                <MessageSquarePlus className="h-4 w-4" />
-              </button>
-            ) : (
-              <span className={cn('flex items-center justify-center text-muted-foreground', isCompact ? 'h-8 w-8' : 'h-6 w-6')}>
-                <ChevronRight className="h-4 w-4" />
-              </span>
-            )}
           </>
         )}
       </div>
@@ -363,9 +340,11 @@ function SidebarProjectItem({
               }}
               className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
             >
-              <Star className={cn('h-5 w-5 flex-shrink-0', isStarred && 'fill-current text-yellow-500')} />
+              <Pin className={cn('h-5 w-5 flex-shrink-0', isStarred && 'fill-current text-amber-500')} />
               <span className="text-sm font-medium">
-                {isStarred ? t('tooltips.removeFromFavorites') : t('tooltips.addToFavorites')}
+                {isStarred
+                  ? t('projects.unpin', { defaultValue: '取消置顶' })
+                  : t('projects.pin', { defaultValue: '置顶' })}
               </span>
             </button>
 

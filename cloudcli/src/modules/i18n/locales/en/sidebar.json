@@ -20,7 +20,9 @@
     "runClaudeCli": "Run Claude CLI in a project directory to get started",
     "sessionCount": "{{count}} sessions",
     "projectOptions": "Project options",
-    "lastActiveLabel": "{{age}} ago"
+    "lastActiveLabel": "{{age}} ago",
+    "pin": "Pin to top",
+    "unpin": "Unpin"
   },
   "app": {
     "title": "Agent 遥控台",

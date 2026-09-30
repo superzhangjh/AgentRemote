@@ -65,12 +65,6 @@ export default function SidebarProjectList({
 
   return (
       <div className="pb-safe-area-inset-bottom md:space-y-1">
-        {showProjects && (
-          <div className="mx-4 pb-1 pt-2 text-xs font-medium text-muted-foreground">
-            {t('projects.title')}
-          </div>
-        )}
-
         {!showProjects
           ? state
           : filteredProjects.map((project) => {
