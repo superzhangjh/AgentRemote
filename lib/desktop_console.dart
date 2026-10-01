@@ -678,7 +678,7 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
       _openCodeManaged = openCodeLoaded;
       openCodePort = openCodeHealthy ? openCodeDescriptorPort : null;
       openCodeStatus = openCodeHealthy
-          ? 'OpenCode SDK 服务正在运行，CloudCLI 会自动复用该服务'
+          ? 'OpenCode CLI 服务正在运行，使用默认 OpenCode 账号'
           : 'OpenCode SDK 服务未启动';
       watchdogEnabled = watchdogLoaded;
       watchdogStatus = watchdogLoaded
@@ -760,6 +760,32 @@ class _DesktopConsolePageState extends State<_DesktopConsolePage> {
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&apos;');
 
+  /// Proxy entries the managed `opencode serve` LaunchAgent must inherit from
+  /// this login session.
+  ///
+  /// A local rule-based proxy (Clash and friends) exports `http_proxy`,
+  /// `https_proxy` and `all_proxy` for the whole GUI session. The LaunchAgent
+  /// starts with a minimal environment, so without copying them here its
+  /// `opencode-go` model calls to https://api.opencode.ai fail with
+  /// "self signed certificate" while the desktop app - launched with the same
+  /// session environment - keeps working. Loopback destinations stay exempt so
+  /// health probes and CloudCLI keep using direct loopback connections.
+  String _proxyEnvironmentEntries() {
+    const names = ['http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'];
+    final values = <String, String>{};
+    for (final name in names) {
+      final value = Platform.environment[name] ?? Platform.environment[name.toUpperCase()];
+      if (value == null || value.isEmpty) continue;
+      values[name] = value;
+      values[name.toUpperCase()] = value;
+    }
+    values.putIfAbsent('no_proxy', () => 'localhost,127.0.0.1,::1');
+    values.putIfAbsent('NO_PROXY', () => 'localhost,127.0.0.1,::1');
+    return values.entries
+        .map((entry) => '    <key>${_xml(entry.key)}</key><string>${_xml(entry.value)}</string>')
+        .join('\n');
+  }
+
   Future<bool> _isOpenCodeLoaded() async {
     try {
       final domain = await _userDomain();
@@ -803,7 +829,7 @@ mkdir -p "$LOG_DIR" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG_FILE" 2>/dev/null; }
 
 healthy() {
-  /usr/bin/curl -fsS --max-time 5 "$1" -o /dev/null 2>/dev/null
+  /usr/bin/curl -fsS --noproxy '*' --max-time 5 "$1" -o /dev/null 2>/dev/null
 }
 
 restart() {
@@ -928,6 +954,7 @@ fi
       await logs.create(recursive: true);
       final path =
           '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${Platform.environment['PATH'] ?? ''}';
+      final proxyEntries = _proxyEnvironmentEntries();
       final plist = '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -941,6 +968,7 @@ fi
   <key>WorkingDirectory</key><string>${_xml(_home)}</string>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>${_xml(path)}</string>
+$proxyEntries
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -985,7 +1013,7 @@ fi
           openCodeRunning = true;
           _openCodeManaged = true;
           openCodePort = port;
-          openCodeStatus = 'OpenCode SDK 服务正在运行，CloudCLI 会自动复用该服务';
+          openCodeStatus = 'OpenCode CLI 服务正在运行，使用默认 OpenCode 账号';
         });
       }
     } catch (error) {
@@ -1506,8 +1534,9 @@ fi
         icon: Icons.extension_outlined,
         children: [
           const Text(
-            '启动长期运行的 opencode serve，并把地址写入共享文件；'
-            'CloudCLI 每轮对话会自动 attach，不再重复拉起服务。',
+            '此服务使用默认 OpenCode 数据目录，供没有桌面客户端时使用。'
+            '手机通信由上方的 CloudCLI 后台服务负责；'
+            '不同账号请分别打开各自独立数据目录的 OpenCode 桌面客户端。',
           ),
           const SizedBox(height: 12),
           SelectableText(openCodeStatus),

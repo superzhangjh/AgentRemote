@@ -41,6 +41,11 @@ migrate_working_dir/
 !.env.example
 *.p12
 *.mobileprovision
+# Android release signing (never commit these)
+/android/key.properties
+/android/keystore/
+*.jks
+*.keystore
 
 # Symbolication related
 app.*.symbols

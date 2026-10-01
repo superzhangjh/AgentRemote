@@ -42,6 +42,12 @@ class CloudCliNotificationService : Service() {
             "cloudcli_connection", "cloudcli_events", "cloudcli_attention",
             "cloudcli_connection_v2", "cloudcli_events_v2", "cloudcli_attention_v2"
         )
+
+        /** Sent by MainActivity when the user opens a session inside the app. */
+        const val ACTION_DISMISS_SESSION = "dev.agentremote.action.DISMISS_SESSION"
+
+        /** Session whose posted notifications should be cancelled. */
+        const val EXTRA_SESSION_ID = "session_id"
     }
 
     private data class NotificationChannelSpec(
@@ -74,7 +80,14 @@ class CloudCliNotificationService : Service() {
     private var attempts = 0
     private var connectionStatus = "正在连接 CloudCLI"
     private val runningTasks = linkedMapOf<String, TaskProgress>()
+    /**
+     * Notification ids already posted per session, so opening that session in
+     * the app can clear whatever is still sitting in the shade.
+     */
+    private val sessionNotificationIds = linkedMapOf<String, MutableSet<Int>>()
     private var nextEventId = 100
+    /** True once the service has entered the foreground state. */
+    private var foreground = false
     @Volatile private var generation = 0
     private val refreshConnection = Runnable { connect() }
     private val channelSpecs = listOf(
@@ -127,12 +140,21 @@ class CloudCliNotificationService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_DISMISS_SESSION) {
+            // The user opened a session manually; the notifications that used to
+            // point at it are no longer actionable. (A notification tap cancels
+            // its own entry via setAutoCancel, this path covers the rest.)
+            cancelSessionNotifications(intent.getStringExtra(EXTRA_SESSION_ID))
+            if (!foreground) stopSelf()
+            return START_STICKY
+        }
         val notification = connectionNotification("正在连接 CloudCLI")
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(1, notification)
         }
+        foreground = true
         if (wakeLock?.isHeld != true) {
             val power = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:cloudcli")
@@ -156,8 +178,9 @@ class CloudCliNotificationService : Service() {
             1 -> "${latest!!.providerName} 正在处理"
             else -> "${agents.joinToString("、")} 正在处理 ${runningTasks.size} 项任务"
         }
-        val content = if (latest == null) message else if (runningTasks.size == 1) latest.detail
-            else "${latest.title} · ${latest.detail}"
+        // Always name the conversation being processed, not just the phase, so
+        // the shade entry answers "which task?" at a glance.
+        val content = if (latest == null) message else "${latest.title} · ${latest.detail}"
         builder
             .setSmallIcon(android.R.drawable.stat_notify_more)
             .setContentTitle(title)
@@ -323,7 +346,10 @@ class CloudCliNotificationService : Service() {
         ) return
 
         val code = data?.optString("code")
-        val urgent = code == "permission.required" || code == "agent.notification" || code == "run.stopped" ||
+        // Questions and approvals are answered from the lock screen; only they
+        // get the full-screen intent that wakes the screen.
+        val actionRequired = code == "permission.required" || code == "agent.notification"
+        val urgent = actionRequired || code == "run.stopped" ||
             code == "run.background_completed" || code == "run.failed"
         val notificationId = nextEventId++
         val provider = data?.optString("provider")?.takeUnless { it.isBlank() || it == "null" }.orEmpty()
@@ -359,8 +385,36 @@ class CloudCliNotificationService : Service() {
             .setCategory(if (urgent) Notification.CATEGORY_MESSAGE else Notification.CATEGORY_STATUS)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setPriority(if (urgent) Notification.PRIORITY_HIGH else Notification.PRIORITY_LOW)
+            .apply {
+                // On Android 13+ the system shows a heads-up instead while the
+                // device is in use; on a locked screen this wakes it and shows
+                // the question/approval. Android 14+ may require the user to
+                // allow full-screen notifications for the app.
+                if (urgent && actionRequired) setFullScreenIntent(open, true)
+            }
             .build()
         manager.notify(notificationId, notification)
+        if (sessionId.isNotBlank()) {
+            recordSessionNotification(sessionId, notificationId)
+        }
+    }
+
+    /** Remembers which notification ids belong to one session. */
+    private fun recordSessionNotification(sessionId: String, notificationId: Int) {
+        sessionNotificationIds.getOrPut(sessionId) { mutableSetOf() }.add(notificationId)
+        // Old sessions can accumulate during a long run; the map only exists to
+        // clear the shade later, so dropping the oldest group is enough.
+        while (sessionNotificationIds.size > 50) {
+            val oldest = sessionNotificationIds.keys.firstOrNull() ?: break
+            sessionNotificationIds.remove(oldest)
+        }
+    }
+
+    /** Cancels every posted notification that points at one session. */
+    private fun cancelSessionNotifications(sessionId: String?) {
+        if (sessionId.isNullOrBlank()) return
+        val ids = sessionNotificationIds.remove(sessionId) ?: return
+        ids.forEach { manager.cancel(it) }
     }
 
     override fun onDestroy() {

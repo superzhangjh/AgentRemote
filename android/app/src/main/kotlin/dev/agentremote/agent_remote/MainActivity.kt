@@ -19,6 +19,7 @@ import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -46,7 +47,7 @@ class MainActivity : FlutterActivity() {
         const val EXTRA_NOTIFICATION_SESSION_ID = "notification_session_id"
         const val EXTRA_NOTIFICATION_PROVIDER = "notification_provider"
 
-        private const val SHAKE_THRESHOLD_GRAVITY = 2.6f
+        private const val SHAKE_THRESHOLD_GRAVITY = 2.0f
         private const val SHAKE_PEAK_COUNT = 3
         private const val SHAKE_PEAK_MIN_GAP_MS = 80L
         private const val SHAKE_WINDOW_MS = 1500L
@@ -56,6 +57,31 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         store.write("app_foreground", "true")
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        revealOverLockScreenForNotification(intent)
+    }
+
+    /**
+     * A question or approval answered from the lock screen launches this
+     * activity through the notification's full-screen intent. Showing over the
+     * keyguard and turning the screen on is what makes that launch wake the
+     * phone instead of leaving it with a dark screen.
+     */
+    @Suppress("DEPRECATION")
+    private fun revealOverLockScreenForNotification(intent: Intent?) {
+        if (readNotificationTarget(intent) == null) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
+            )
+        }
     }
 
     override fun onPause() {
@@ -90,6 +116,7 @@ class MainActivity : FlutterActivity() {
             if (notificationNavigationReady) {
                 notificationChannel?.invokeMethod("notificationTapped", target)
             }
+            revealOverLockScreenForNotification(intent)
         }
     }
 
@@ -138,7 +165,17 @@ class MainActivity : FlutterActivity() {
                             result.success(null)
                         }
                         "setVisibleSession" -> {
-                            store.write("visible_session_id", call.argument<String>("sessionId").orEmpty())
+                            val sessionId = call.argument<String>("sessionId").orEmpty()
+                            store.write("visible_session_id", sessionId)
+                            // Entering a session by hand should clear whatever
+                            // notification brought the user back to it.
+                            if (sessionId.isNotBlank() && store.read("enabled") == "true") {
+                                startService(
+                                    Intent(this, CloudCliNotificationService::class.java)
+                                        .setAction(CloudCliNotificationService.ACTION_DISMISS_SESSION)
+                                        .putExtra(CloudCliNotificationService.EXTRA_SESSION_ID, sessionId),
+                                )
+                            }
                             result.success(null)
                         }
                         "enqueueDownload" -> {
