@@ -1,110 +1,73 @@
-import { readFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
-
-import spawn from 'cross-spawn';
-
+import { createOpenCodeServerClient } from '@/modules/providers/list/opencode/opencode-server.js';
 import type { IProviderAuth } from '@/shared/interfaces.js';
 import type { ProviderAuthStatus } from '@/shared/types.js';
-import { readObjectRecord, readOptionalString } from '@/shared/utils.js';
+import { readObjectRecord, readStringArray } from '@/shared/utils.js';
 
-type OpenCodeCredentialsStatus = {
-  authenticated: boolean;
-  email: string | null;
-  method: string | null;
-  error?: string;
-};
-
-const OPENCODE_ENV_CREDENTIAL_KEYS = [
-  'ANTHROPIC_API_KEY',
-  'OPENAI_API_KEY',
-  'GOOGLE_GENERATIVE_AI_API_KEY',
-  'GROQ_API_KEY',
-  'OPENROUTER_API_KEY',
-];
-
+/**
+ * Auth status for OpenCode, read through the server SDK.
+ *
+ * The server owns both installation and credentials: a successful health probe
+ * means an OpenCode server is running, and `provider.list().connected` names
+ * every provider it can route to (including ones configured only through
+ * environment API keys). Reading the credentials file directly, as this adapter
+ * used to, missed env-key installs and duplicated the server's own view.
+ */
 export class OpenCodeProviderAuth implements IProviderAuth {
-  /**
-   * Checks whether the OpenCode CLI is available to the server process.
-   */
-  private checkInstalled(): boolean {
-    try {
-      const result = spawn.sync('opencode', ['--version'], { stdio: 'ignore', timeout: 5000 });
-      return !result.error && result.status === 0;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Returns OpenCode CLI installation and credential status.
-   */
   async getStatus(): Promise<ProviderAuthStatus> {
-    const installed = this.checkInstalled();
-    const credentials = await this.checkCredentials();
+    const client = createOpenCodeServerClient();
 
-    return {
-      installed,
-      provider: 'opencode',
-      authenticated: credentials.authenticated,
-      email: credentials.email,
-      method: credentials.method,
-      error: credentials.authenticated ? undefined : credentials.error || 'Not authenticated',
-    };
-  }
-
-  /**
-   * Reads OpenCode's auth store or falls back to provider API key environment variables.
-   */
-  private async checkCredentials(): Promise<OpenCodeCredentialsStatus> {
     try {
-      const authPath = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json');
-      const content = await readFile(authPath, 'utf8');
-      const auth = readObjectRecord(JSON.parse(content)) ?? {};
-
-      for (const [providerId, providerAuth] of Object.entries(auth)) {
-        const providerRecord = readObjectRecord(providerAuth);
-        if (!providerRecord) {
-          continue;
-        }
-
-        const hasCredential = Object.values(providerRecord).some(
-          (value) => readOptionalString(value) !== undefined || Boolean(readObjectRecord(value)),
-        );
-        if (hasCredential) {
-          return {
-            authenticated: true,
-            email: `${providerId} credentials`,
-            method: 'credentials_file',
-          };
-        }
+      const health = await client.global.health({ throwOnError: true });
+      if (readObjectRecord(health.data)?.healthy !== true) {
+        return notInstalled('OpenCode server is not healthy');
       }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
+    } catch {
+      return notInstalled('OpenCode server is not reachable');
+    }
+
+    try {
+      const result = await client.provider.list({}, { throwOnError: true });
+      const connected = readStringArray(readObjectRecord(result.data)?.connected) ?? [];
+      if (connected.length > 0) {
         return {
-          authenticated: false,
-          email: null,
-          method: null,
-          error: error instanceof Error ? error.message : 'Failed to read OpenCode auth',
+          installed: true,
+          provider: 'opencode',
+          authenticated: true,
+          // The field is display-only in the app; listing the connected
+          // providers is more useful than a single credential source.
+          email: connected.join(', '),
+          method: 'server',
         };
       }
-    }
-
-    const envCredential = OPENCODE_ENV_CREDENTIAL_KEYS.find((key) => process.env[key]?.trim());
-    if (envCredential) {
+    } catch (error) {
       return {
-        authenticated: true,
-        email: envCredential,
-        method: 'environment',
+        installed: true,
+        provider: 'opencode',
+        authenticated: false,
+        email: null,
+        method: null,
+        error: error instanceof Error ? error.message : 'Failed to read OpenCode providers',
       };
     }
 
     return {
+      installed: true,
+      provider: 'opencode',
       authenticated: false,
       email: null,
       method: null,
       error: 'OpenCode not configured',
     };
   }
+}
+
+function notInstalled(error: string): ProviderAuthStatus {
+  return {
+    installed: false,
+    provider: 'opencode',
+    authenticated: false,
+    email: null,
+    method: null,
+    error,
+  };
 }

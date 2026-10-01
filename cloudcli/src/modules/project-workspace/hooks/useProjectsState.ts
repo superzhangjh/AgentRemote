@@ -7,7 +7,9 @@ import type { ServerEvent,
   LLMProvider,
   LoadingProgress,
   Project,
-  ProjectSession,IsSessionProcessing } from '@/shared/types';
+  ProjectSession,
+  SessionUpsertedEvent,
+  IsSessionProcessing } from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
 import { readCachedProjects, writeCachedProjects } from '@/modules/project-workspace/utils/projectsLocalCache';
 import { readSelectedProvider } from '@/shared/selectedProvider';
@@ -21,29 +23,6 @@ type UseProjectsStateArgs = {
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
   isMobile: boolean;
   isSessionProcessing: IsSessionProcessing;
-};
-
-/**
- * Shape of the per-session sidebar delta (`kind: session_upserted`). It carries
- * everything needed to upsert one session row in place — no full project-list
- * snapshot is ever pushed.
- *
- * Produced on the wire by exactly one builder,
- * `server/modules/websocket/services/session-upsert-broadcast.service.ts`,
- * which both the on-disk sessions watcher and the chat run registry go through.
- */
-type SessionUpsertedEvent = ServerEvent & {
-  sessionId: string;
-  providerSessionId?: string | null;
-  provider: LLMProvider;
-  session: ProjectSession;
-  project: {
-    projectId: string;
-    path: string;
-    fullPath: string;
-    displayName: string;
-    isStarred: boolean;
-  } | null;
 };
 
 type FetchProjectsOptions = {
@@ -886,18 +865,25 @@ export function useProjectsState({
         return;
       }
 
-      // The transcript of the currently viewed session changed on disk while
-      // no run is active here (e.g. edited from another client or the CLI):
-      // signal the chat view to reload its messages.
       const currentSelectedSession = selectedSessionRef.current;
-      if (
-        currentSelectedSession
-        && upsert.sessionId === currentSelectedSession.id
-        && !isSessionProcessing(upsert.sessionId)
-      ) {
-        setExternalMessageUpdate((prev) => prev + 1);
-      } else {
-        markSessionAttention(upsert.sessionId);
+
+      // A title-only rename carries no new output, so it must not raise the
+      // sidebar's attention indicator or reload the open transcript. Treating
+      // it like a content change put a spurious "unread" dot on the renamed row
+      // for the user who did the renaming.
+      if (upsert.reason !== 'rename') {
+        // The transcript of the currently viewed session changed on disk while
+        // no run is active here (e.g. edited from another client or the CLI):
+        // signal the chat view to reload its messages.
+        if (
+          currentSelectedSession
+          && upsert.sessionId === currentSelectedSession.id
+          && !isSessionProcessing(upsert.sessionId)
+        ) {
+          setExternalMessageUpdate((prev) => prev + 1);
+        } else {
+          markSessionAttention(upsert.sessionId);
+        }
       }
 
       setProjects((previousProjects) => {
@@ -1324,6 +1310,7 @@ export function useProjectsState({
       settingsInitialTab,
       onCloseSettings: () => setShowSettings(false),
       isMobile,
+      subscribe,
     }),
     [
       attentionSessionIds,
@@ -1342,6 +1329,7 @@ export function useProjectsState({
       selectedProject,
       selectedSession,
       showSettings,
+      subscribe,
     ],
   );
 

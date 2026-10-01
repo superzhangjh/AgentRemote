@@ -20,6 +20,7 @@ import type { SessionUpsertedEvent } from '@/shared/types.js';
  */
 async function buildSessionUpsertedEvent(
   sessionIdOrProviderSessionId: string,
+  reason?: SessionUpsertedEvent['reason'],
 ): Promise<SessionUpsertedEvent | null> {
   // Synchronizers return the app id from createSession. Resolve that first:
   // another provider may happen to use this same string as its native id.
@@ -57,6 +58,7 @@ async function buildSessionUpsertedEvent(
         isStarred: Boolean(project.isStarred),
       }
       : null,
+    ...(reason ? { reason } : {}),
     timestamp: new Date().toISOString(),
   };
 }
@@ -75,9 +77,16 @@ function sendToConnectedClients(payloads: string[]): void {
   });
 }
 
-/** Announces one session. Used by the chat run registry when a run reports its provider-native id. */
-export async function broadcastSessionUpserted(sessionIdOrProviderSessionId: string): Promise<void> {
-  const event = await buildSessionUpsertedEvent(sessionIdOrProviderSessionId);
+/**
+ * Announces one session. Used by the chat run registry when a run reports its
+ * provider-native id, and by the session rename flow, which passes
+ * `reason: 'rename'` so clients treat it as a title-only change.
+ */
+export async function broadcastSessionUpserted(
+  sessionIdOrProviderSessionId: string,
+  reason?: SessionUpsertedEvent['reason'],
+): Promise<void> {
+  const event = await buildSessionUpsertedEvent(sessionIdOrProviderSessionId, reason);
   if (event) {
     sendToConnectedClients([JSON.stringify(event)]);
   }

@@ -333,15 +333,31 @@ export function useChatSessionState({
     async () => true,
   );
   latestRefreshExecutorRef.current = async (sessionId: string) => {
+    const canRequest = () => (
+      isActiveRef.current
+      && activeSessionIdRef.current === sessionId
+    );
     const result = await sessionStore.refreshLatestFromServer(sessionId, {
       limit: SESSION_MESSAGES_PAGE_SIZE,
-      canRequest: () => (
-        isActiveRef.current
-        && activeSessionIdRef.current === sessionId
-      ),
+      canRequest,
       beforeApply: (messages) => preserveHistoryScroll(sessionId, messages),
     });
-    const slot = result.slot;
+
+    // The bounded refresh stitches the newest page onto the cached suffix. When
+    // the two cannot be joined — a long external run left a wide gap, or the
+    // transcript was rewritten — the store deliberately keeps the cached rows,
+    // which would pin the view to a stale transcript forever. Fall back to a
+    // full read so the session always catches up.
+    if (!result.applied && !result.deferred && canRequest()) {
+      await sessionStore.fetchFromServer(sessionId, {
+        limit: null,
+        offset: 0,
+        canRequest,
+        beforeApply: (messages) => preserveHistoryScroll(sessionId, messages),
+      });
+    }
+
+    const slot = sessionStore.getSessionSlot(sessionId) ?? result.slot;
     if (slot && activeSessionIdRef.current === sessionId && slot.provider === activeProviderRef.current) {
       setHasMoreMessages(slot.hasMore);
       allMessagesLoadedRef.current = !slot.hasMore;

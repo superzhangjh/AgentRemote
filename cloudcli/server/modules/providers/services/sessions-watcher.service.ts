@@ -4,8 +4,16 @@ import { promises as fsPromises } from 'node:fs';
 
 import chokidar, { type FSWatcher } from 'chokidar';
 
+import { sessionsDb, userDb } from '@/modules/database/index.js';
+import { notifyRunStopped, sendDesktopTaskProgress } from '@/modules/notifications/index.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
-import { broadcastSessionUpsertedBatch } from '@/modules/websocket/index.js';
+import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import {
+  broadcastSessionUpsertedBatch,
+  chatRunRegistry,
+  isExternalSessionBusy,
+  setExternalSessionActivity,
+} from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
 
 type WatcherEventType = 'add' | 'change';
@@ -60,6 +68,34 @@ let pendingWatcherUpdateStartedAt: number | null = null;
 let pendingWatcherFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let watcherRefreshInFlight = false;
 let watcherRescheduleAfterRefresh = false;
+
+async function syncCodexActivity(sessionId: string, notifyCompletion: boolean): Promise<void> {
+  if (chatRunRegistry.isProcessing(sessionId)) return;
+  const running = await sessionsService.isExternalCodexSessionRunning(sessionId);
+  const wasRunning = isExternalSessionBusy(sessionId);
+  if (running === wasRunning) return;
+
+  setExternalSessionActivity(sessionId, 'codex', running, running ? '外部运行中' : null);
+  const userId = userDb.getFirstUser()?.id;
+  if (!userId) return;
+  const title = sessionsDb.getSessionName(sessionId, 'codex') || 'Codex 任务';
+  sendDesktopTaskProgress(userId, {
+    sessionId,
+    provider: 'codex',
+    title,
+    detail: running ? '外部运行中' : '已完成',
+    steps: 0,
+    state: running ? 'running' : 'finished',
+  });
+  if (wasRunning && !running && notifyCompletion) {
+    (notifyRunStopped as unknown as (input: {
+      userId: number;
+      provider: string;
+      sessionId: string;
+      sessionName: string;
+    }) => void)({ userId, provider: 'codex', sessionId, sessionName: title });
+  }
+}
 
 /**
  * Filters watcher events to provider-specific session artifact file types.
@@ -178,6 +214,9 @@ async function onUpdate(
       filePath,
       sessionId: result.sessionId,
     });
+    if (provider === 'codex' && result.sessionId) {
+      await syncCodexActivity(result.sessionId, true);
+    }
     queuePendingWatcherUpdate(eventType, provider, result.sessionId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -201,6 +240,16 @@ export async function initializeSessionsWatcher(): Promise<void> {
     prunedOrphans: initialSync.prunedOrphans,
     failures: initialSync.failures,
   });
+
+  for (const session of sessionsDb.getAllSessions()) {
+    if (session.provider === 'codex' && session.jsonl_path) {
+      try {
+        await syncCodexActivity(session.session_id, false);
+      } catch (error) {
+        console.error('Codex activity sync failed', { sessionId: session.session_id, error });
+      }
+    }
+  }
 
   for (const { provider, rootPath } of PROVIDER_WATCH_PATHS) {
     try {

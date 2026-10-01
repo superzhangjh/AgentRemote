@@ -5,6 +5,7 @@ import type {
   Project,
   ProjectSession,
   ProjectSortOrder,
+  RecentConversationListItem,
   SessionWithProvider,
   SettingsProject,
 } from '@/shared/types';
@@ -243,4 +244,34 @@ export const PROVIDER_LABELS: Record<LLMProvider, string> = {
   codex: 'Codex',
   cursor: 'Cursor',
   opencode: 'OpenCode',
+};
+
+/**
+ * Applies one `session_upserted` rename to the loaded recent-conversations rows.
+ *
+ * Used by the sidebar controller: that feed is paginated separately from the
+ * project list, so a rename made on another device never reaches it through a
+ * project refresh. Returning the same array when nothing matched or the title
+ * already agreed lets the caller pass it straight to `setState` without a
+ * needless render. The provider check keeps a rename for a provider this feed
+ * is not showing from leaking in.
+ */
+export const applyRecentConversationRename = (
+  conversations: RecentConversationListItem[],
+  rename: { sessionId: string; provider: LLMProvider; summary: string },
+): RecentConversationListItem[] => {
+  let changed = false;
+  const next = conversations.map((conversation) => {
+    if (
+      conversation.sessionId !== rename.sessionId
+      || conversation.provider !== rename.provider
+      || conversation.sessionTitle === rename.summary
+    ) {
+      return conversation;
+    }
+    changed = true;
+    return { ...conversation, sessionTitle: rename.summary };
+  });
+
+  return changed ? next : conversations;
 };

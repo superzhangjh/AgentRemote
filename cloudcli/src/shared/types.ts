@@ -210,6 +210,29 @@ export type ServerEvent = {
   [key: string]: unknown;
 };
 
+/**
+ * The `session_upserted` sidebar delta. It carries everything a sidebar needs
+ * to upsert one session row in place — its summary plus the owning project's
+ * metadata — so no full project-list snapshot is ever pushed. Consumed by the
+ * project-workspace state hook and the sidebar's recent-conversations feed.
+ *
+ * Produced on the wire by exactly one builder,
+ * `server/modules/websocket/services/session-upsert-broadcast.service.ts`.
+ */
+export type SessionUpsertedEvent = ServerEvent & {
+  sessionId: string;
+  providerSessionId?: string | null;
+  provider: LLMProvider;
+  session: ProjectSession;
+  project: {
+    projectId: string;
+    path: string;
+    fullPath: string;
+    displayName: string;
+    isStarred: boolean;
+  } | null;
+};
+
 
 // ---------------------------
 
@@ -1306,6 +1329,8 @@ export type SidebarProjectListProps = SessionRowActions & {
   onCancelEditingProject: () => void;
   onSaveProjectName: (projectId: string, nextName: string) => void;
   onDeleteProject: (project: Project) => void;
+  /** Opens the project's multi-select dialog for deleting several sessions at once. */
+  onBatchDeleteSessions: (project: Project) => void;
   onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
   onNewSession: (project: Project) => void;
   t: TFunction;
@@ -1364,11 +1389,13 @@ export type ActiveSidebarRename =
  * The sidebar's pending delete confirmation. One value rather than a pair of
  * nullable states, so a project dialog and a session dialog cannot both be
  * open — they are portalled at the same z-index and would stack. The project
- * variant carries the session count the dialog warns with.
+ * variant carries the session count the dialog warns with; the batch variant
+ * carries the project whose sessions are being multi-selected.
  */
 export type PendingSidebarDeletion =
   | { kind: 'project'; project: Project; sessionCount: number }
-  | { kind: 'session'; sessionId: string; sessionTitle: string; isArchived: boolean };
+  | { kind: 'session'; sessionId: string; sessionTitle: string; isArchived: boolean }
+  | { kind: 'batch-sessions'; project: Project };
 
 /** Whether a TaskMaster MCP server is present and configured for a project, or null while that status is still unknown. */
 export type MCPServerStatus = {

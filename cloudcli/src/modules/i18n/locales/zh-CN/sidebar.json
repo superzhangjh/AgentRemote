@@ -22,7 +22,8 @@
     "projectOptions": "项目操作",
     "lastActiveLabel": "{{age}}前",
     "pin": "置顶",
-    "unpin": "取消置顶"
+    "unpin": "取消置顶",
+    "batchDeleteSessions": "批量删除会话"
   },
   "app": {
     "title": "Agent 遥控台",
@@ -122,7 +123,8 @@
     "restoreProjectError": "恢复项目时出错，请重试。",
     "restoreSessionFailed": "恢复会话失败，请重试。",
     "restoreSessionError": "恢复会话时出错，请重试。",
-    "forkSessionError": "无法派生该会话，请重试。"
+    "forkSessionError": "无法派生该会话，请重试。",
+    "batchDeleteSessionPartial": "{{count}} 个会话删除失败。"
   },
   "version": {
     "updateAvailable": "有可用更新",
@@ -157,5 +159,18 @@
     "deleteAllData": "永久删除所有数据",
     "allConversationsDeleted": "项目将从侧边栏中移除。您的文件、记忆和会话数据将会保留。",
     "cannotUndo": "您可以稍后重新添加此项目。"
+  },
+  "batchDelete": {
+    "title": "批量删除会话",
+    "selectAll": "全选",
+    "clearSelection": "取消全选",
+    "selectedCount": "已选 {{count}} 个",
+    "empty": "该项目暂无会话。",
+    "loadFailed": "加载会话失败。",
+    "retry": "重试",
+    "running": "运行中",
+    "archiveSelected": "归档所选",
+    "deleteSelected": "永久删除所选",
+    "archiveNotice": "归档会保留会话记录；永久删除会同时删除磁盘上的记录。"
   }
 }

@@ -93,8 +93,43 @@ const UNIFIED_TOOL_LABELS: Record<string, string> = {
   AskUserQuestion: 'Question',
 };
 
+/**
+ * Provider spellings of one tool, mapped to the canonical name the registry
+ * and the backend unification use.
+ *
+ * OpenCode's native `question` tool is the same ask-the-user round trip as
+ * Claude's `AskUserQuestion`, so both render as the same card.
+ *
+ * Used by chat's ToolRenderer and by this registry's config/result helpers.
+ */
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  question: 'AskUserQuestion',
+};
+
+export function resolveCanonicalToolName(toolName: string): string {
+  return TOOL_NAME_ALIASES[toolName] ?? toolName;
+}
+
+/**
+ * True when an ask-the-user call failed because the user dismissed it.
+ *
+ * OpenCode reports a dismissal as the tool's error result. That is a
+ * deliberate choice, not a failure, so the chat shows the card as skipped
+ * and hides the raw error text.
+ *
+ * Used by chat's ToolRenderer and its result-hiding helper below.
+ */
+export function isDismissedQuestionResult(toolName: string, toolResult: any): boolean {
+  if (resolveCanonicalToolName(toolName) !== 'AskUserQuestion') {
+    return false;
+  }
+
+  const content = String(toolResult?.content ?? '').toLowerCase();
+  return content.includes('dismissed this question') || content.includes('user dismissed');
+}
+
 export function formatToolDisplayName(toolName: string): string {
-  const unifiedLabel = UNIFIED_TOOL_LABELS[toolName];
+  const unifiedLabel = UNIFIED_TOOL_LABELS[resolveCanonicalToolName(toolName)];
   if (unifiedLabel) {
     return unifiedLabel;
   }
@@ -795,13 +830,21 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
  * Get configuration for a tool, with fallback to default
  */
 export function getToolConfig(toolName: string): ToolDisplayConfig {
-  return TOOL_CONFIGS[toolName] || TOOL_CONFIGS.Default;
+  const canonicalName = resolveCanonicalToolName(toolName);
+  return TOOL_CONFIGS[canonicalName] || TOOL_CONFIGS.Default;
 }
 
 /**
  * Check if a tool result should be hidden
  */
 export function shouldHideToolResult(toolName: string, toolResult: any): boolean {
+  // A dismissed question is a deliberate user action; the card's own skipped
+  // badge says so, and the raw error text ("The user dismissed this question")
+  // would otherwise render as a failure below it.
+  if (isDismissedQuestionResult(toolName, toolResult)) {
+    return true;
+  }
+
   const config = getToolConfig(toolName);
 
   if (!config.result) return false;

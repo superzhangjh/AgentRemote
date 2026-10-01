@@ -7,7 +7,8 @@ export {
   notifyUserIfEnabled,
   // Used by provider runtimes to report failed agent runs.
   notifyRunFailed,
-  // Used by provider runtimes to report stopped or completed agent runs.
+  // Used by provider runtimes and the OpenCode bridge to report stopped or
+  // completed agent runs.
   notifyRunStopped,
   // Used by provider runtimes to report background work that finished after its turn ended.
   notifyBackgroundWorkCompleted,

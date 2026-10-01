@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { sessionsDb } from '@/modules/database/index.js';
-import { createOpenCodeServerClient } from '@/modules/providers/list/opencode/opencode-server.js';
+import { readOpenCodeSessionInfo } from '@/modules/providers/list/opencode/opencode-server.js';
 import type { AnyRecord } from '@/shared/types.js';
 import { AppError, readObjectRecord } from '@/shared/utils.js';
 
@@ -279,22 +279,15 @@ async function readOpenCodeTokenUsage(
   providerSessionId: string,
   directory: string | undefined,
 ): Promise<TokenUsageResult> {
-  let session: AnyRecord | null;
-  try {
-    const client = createOpenCodeServerClient();
-    const result = await client.session.get(
-      { sessionID: providerSessionId, directory },
-      { throwOnError: true },
-    );
-    session = readObjectRecord(result.data);
-  } catch {
+  const session = await readOpenCodeSessionInfo(providerSessionId, directory);
+  if (!session) {
     throw new AppError('OpenCode session was not found.', {
       code: 'OPENCODE_SESSION_NOT_FOUND',
       statusCode: 404,
     });
   }
 
-  const tokens = readObjectRecord(session?.tokens);
+  const tokens = readObjectRecord(session.tokens);
   const inputTokens = readUsageNumber(tokens?.input) + readUsageNumber(readObjectRecord(tokens?.cache)?.read);
   const outputTokens = readUsageNumber(tokens?.output);
   const used = readUsageNumber(tokens?.input)

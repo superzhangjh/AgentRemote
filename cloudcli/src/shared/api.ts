@@ -224,6 +224,11 @@ export const api = {
   // - hardDelete: remove the row and, by default, its persisted transcript file
   deleteSession: (sessionId: string, hardDelete = false) =>
     del(`/api/providers/sessions/${sessionId}${query({ force: hardDelete })}`),
+  // Batch variant used by the sidebar's multi-select delete dialog: one request
+  // for every selected id, with the same archive-vs-force semantics applied to
+  // each. The response reports per-session results and failures.
+  deleteSessions: (sessionIds: string[], hardDelete = false) =>
+    post('/api/providers/sessions/batch-delete', { sessionIds, force: hardDelete }),
   getArchivedSessions: () => get('/api/providers/sessions/archived'),
   // Resolves one session (by app id or provider-native id) to its metadata and
   // owning project — used when a /session/<id> URL isn't in loaded payloads.
@@ -364,7 +369,8 @@ export const api = {
     authStatus: (provider: string) =>
       get(`/api/providers/${encodeURIComponent(provider)}/auth/status`),
 
-    models: (provider: string) => get(`/api/providers/${provider}/models`),
+    models: (provider: string, serverId?: string) =>
+      get(`/api/providers/${provider}/models${serverId ? `?serverId=${encodeURIComponent(serverId)}` : ''}`),
     createModel: (provider: string, input: unknown) =>
       post(`/api/providers/${provider}/models`, input),
     updateModel: (provider: string, recordId: string | number, input: unknown) =>

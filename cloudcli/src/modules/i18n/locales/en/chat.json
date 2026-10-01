@@ -112,6 +112,17 @@
     "loading": "Loading…"
   },
   "input": {
+    "openCodeInstance": "OpenCode instance",
+    "openCodeInstanceHelp": "Choose the OpenCode instance for this new chat",
+    "openCodeInstanceNote": "Desktop instances use their own logins. AgentRemote CLI is a separate service.",
+    "noOpenCodeInstances": "No OpenCode instances available",
+    "openCodeInstancesFailed": "Could not load OpenCode instances",
+    "chooseOpenCodeInstance": "Choose an available OpenCode instance before sending.",
+    "waitForOpenCodeModels": "Loading models for this OpenCode instance. Try again in a moment.",
+    "nameOpenCodeInstance": "Name this OpenCode instance",
+    "renameOpenCodeInstance": "Name",
+    "saveOpenCodeInstanceName": "Save",
+    "closeOpenCodeInstancePicker": "Done",
     "placeholder": "Type / for commands, @ for files, or ask {{provider}} anything...",
     "placeholderDefault": "Type your message...",
     "disabled": "Input disabled",

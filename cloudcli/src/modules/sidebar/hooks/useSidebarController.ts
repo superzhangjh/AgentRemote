@@ -4,8 +4,9 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ServerEvent, SessionUpsertedEvent, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode } from '@/shared/types';
 import {
+  applyRecentConversationRename,
   filterProjects,
   getAllSessions,
   sortProjects,
@@ -40,6 +41,14 @@ type RecentConversationsApiPayload = {
   };
 };
 
+type BatchDeleteSessionsApiPayload = {
+  success?: boolean;
+  data?: {
+    results?: Array<{ sessionId: string }>;
+    failures?: Array<{ sessionId: string; message: string }>;
+  };
+};
+
 type UseSidebarControllerArgs = {
   projects: Project[];
   selectedProvider: LLMProvider;
@@ -59,6 +68,8 @@ type UseSidebarControllerArgs = {
   setCurrentProject: (project: Project) => void;
   setSidebarVisible: (visible: boolean) => void;
   sidebarVisible: boolean;
+  /** Subscription to the unified websocket event stream, used to keep the recent-conversations feed in sync with renames made elsewhere. */
+  subscribe: (listener: (event: ServerEvent) => void) => () => void;
 };
 
 export function useSidebarController({
@@ -79,6 +90,7 @@ export function useSidebarController({
   setCurrentProject,
   setSidebarVisible,
   sidebarVisible,
+  subscribe,
 }: UseSidebarControllerArgs) {
   const paletteOps = usePaletteOps();
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
@@ -314,6 +326,31 @@ export function useSidebarController({
   useEffect(() => {
     void fetchArchivedSessions();
   }, [fetchArchivedSessions]);
+
+  // Recent conversations are paginated separately from the project list, so a
+  // `session_upserted` rename — made on another device, or applied through the
+  // project sidebar — would otherwise leave this feed on the old title until it
+  // is refetched. Patch the loaded rows in place, matching the event's provider
+  // so a rename for a provider this list is not showing cannot leak in.
+  useEffect(() => {
+    return subscribe((event) => {
+      if (event.kind !== 'session_upserted') {
+        return;
+      }
+
+      const upsert = event as SessionUpsertedEvent;
+      const summary = upsert.session?.summary?.trim();
+      if (!upsert.sessionId || !summary) {
+        return;
+      }
+
+      setRecentConversations((previous) => applyRecentConversationRename(previous, {
+        sessionId: upsert.sessionId,
+        provider: upsert.provider,
+        summary,
+      }));
+    });
+  }, [subscribe]);
 
   useEffect(() => {
     if (searchMode !== 'conversations' || debouncedSearchQuery.length >= 2) {
@@ -856,6 +893,73 @@ export function useSidebarController({
     [getProjectSessions],
   );
 
+  /** Opens the batch-delete dialog for one project's sessions. */
+  const requestBatchDeleteSessions = useCallback((project: Project) => {
+    setPendingDeletion({ kind: 'batch-sessions', project });
+  }, []);
+
+  /**
+   * Applies the batch dialog's selection through the batch endpoint, then
+   * removes every resolved id from the sidebar and the recents feed.
+   *
+   * `pendingDeletion` is cleared last so the dialog stays open with its busy
+   * state until the request settles; the endpoint answers 200 even when some
+   * ids failed, so failures are reported per count after the successful rows
+   * have already been removed.
+   */
+  const confirmBatchDeleteSessions = useCallback(async (sessionIds: string[], hardDelete: boolean) => {
+    if (pendingDeletion?.kind !== 'batch-sessions' || sessionIds.length === 0) {
+      return;
+    }
+
+    try {
+      const response = await api.deleteSessions(sessionIds, hardDelete);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('[Sidebar] Failed to delete sessions:', {
+          status: response.status,
+          error: errorText,
+        });
+        alert(t('messages.deleteSessionFailed'));
+        return;
+      }
+
+      const payload = (await response.json()) as BatchDeleteSessionsApiPayload;
+      const deletedSessionIds = (payload.data?.results ?? []).map((result) => result.sessionId);
+      const failureCount = payload.data?.failures?.length ?? 0;
+
+      for (const sessionId of deletedSessionIds) {
+        onSessionDelete?.(sessionId);
+      }
+
+      // Same gap as the single-session delete: nothing refetches the recents
+      // feed, so drop every removed row in place. Archiving keeps the session,
+      // so only the non-archived total moves.
+      setRecentConversations((previous) => {
+        const deletedIds = new Set(deletedSessionIds);
+        const remaining = previous.filter((conversation) => !deletedIds.has(conversation.sessionId));
+        if (remaining.length !== previous.length) {
+          setRecentConversationsTotal((total) => Math.max(0, total - (previous.length - remaining.length)));
+        }
+        return remaining;
+      });
+      await fetchArchivedSessions();
+
+      if (failureCount > 0) {
+        alert(t('messages.batchDeleteSessionPartial', {
+          count: failureCount,
+          defaultValue: '{{count}} sessions could not be deleted.',
+        }));
+      }
+    } catch (error) {
+      console.error('[Sidebar] Error deleting sessions:', error);
+      alert(t('messages.deleteSessionError'));
+    } finally {
+      setPendingDeletion(null);
+    }
+  }, [fetchArchivedSessions, onSessionDelete, pendingDeletion, t]);
+
   const confirmDeleteProject = useCallback(async (deleteData = false) => {
     if (pendingDeletion?.kind !== 'project') {
       return;
@@ -1103,6 +1207,8 @@ export function useSidebarController({
     confirmDeleteSession,
     requestProjectDelete,
     confirmDeleteProject,
+    requestBatchDeleteSessions,
+    confirmBatchDeleteSessions,
     handleProjectSelect,
     openArchivedSession,
     restoreArchivedProject,

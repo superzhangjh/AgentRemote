@@ -1,7 +1,4 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
@@ -10,16 +7,23 @@ import { sessionsDb, userDb } from '@/modules/database/index.js';
 import {
   notifyPermissionRequired,
   notifyQuestionRequired,
+  notifyRunStopped,
   sendDesktopTaskProgress,
 } from '@/modules/notifications/index.js';
-import { connectedClients, setExternalSessionActivity, WS_OPEN_STATE } from '@/modules/websocket/index.js';
-import type { LLMProvider, ProviderPermissionDecision, ProviderRuntimePermissionGateway } from '@/shared/types.js';
-import { createNormalizedMessage, readSharedOpenCodeServerUrl } from '@/shared/utils.js';
+import { chatRunRegistry, connectedClients, setExternalSessionActivity, WS_OPEN_STATE } from '@/modules/websocket/index.js';
+import type {
+  LLMProvider,
+  OpenCodeServerConfig,
+  ProviderPermissionDecision,
+  ProviderRuntimePermissionGateway,
+} from '@/shared/types.js';
+import { createNormalizedMessage, resolveOpenCodeServerConfigs } from '@/shared/utils.js';
 
 const PROVIDER: LLMProvider = 'opencode';
-const DEFAULT_SERVER_URL = 'http://127.0.0.1:4096';
 const INITIAL_RETRY_DELAY_MS = 2_000;
 const MAX_RETRY_DELAY_MS = 30_000;
+/** How often a live stream re-reads the active set to heal missed idle events. */
+const STATUS_RECONCILE_INTERVAL_MS = 30_000;
 const MAX_TRACKED_IDS = 500;
 
 type OpenCodeClient = ReturnType<typeof createOpencodeClient>;
@@ -51,6 +55,39 @@ type OpenCodeQuestion = {
   header: string;
   options: OpenCodeQuestionOption[];
   multiSelect: boolean;
+};
+
+/** One selectable option of an OpenCode v2 form field. */
+type OpenCodeFormOption = {
+  value?: string;
+  label?: string;
+  description?: string;
+};
+
+/**
+ * One field of an OpenCode v2 form.
+ *
+ * Desktop servers (2.0+) implement the `question` tool as a form whose
+ * metadata is marked `kind: "question"`; each question becomes a `multiselect`
+ * (multi-select) or `string` (single-select) field, with `custom` enabled so
+ * the phone's free-form "Other" answer stays valid.
+ */
+type OpenCodeFormField = {
+  key?: string;
+  title?: string;
+  description?: string;
+  type?: string;
+  options?: OpenCodeFormOption[];
+  custom?: boolean;
+};
+
+/** A pending OpenCode v2 form, shaped after the server's `Form.Info`. */
+type OpenCodeForm = {
+  id?: string;
+  sessionID?: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+  fields?: OpenCodeFormField[];
 };
 
 /**
@@ -126,6 +163,12 @@ type OpenCodePendingQuestion = {
   /** URL of the server that raised the question, so the reply goes back to it. */
   serverUrl: string;
   questions: OpenCodeQuestion[];
+  /**
+   * Set when the question arrived as a v2 form (OpenCode 2.0+ desktop servers).
+   * Those requests are answered through the form API instead of the legacy
+   * question endpoints, and carry the field keys the answers must use.
+   */
+  form: OpenCodeForm | null;
   receivedAt: Date;
 };
 
@@ -153,193 +196,19 @@ function rememberId(store: Set<string>, id: string): boolean {
   return true;
 }
 
-type OpenCodeServerConfig = {
-  url: string;
-  headers: Record<string, string>;
-};
-
-/** Builds the Basic auth header from an explicit username/password pair. */
-function buildAuthHeaders(username: string | undefined, password: string | undefined): Record<string, string> {
-  if (!password) {
-    return {};
-  }
-
-  const token = Buffer.from(`${username?.trim() || 'opencode'}:${password}`, 'utf8').toString('base64');
-  return { Authorization: `Basic ${token}` };
-}
-
 /**
- * Reads a running `opencode serve` process's `--port` and
- * `OPENCODE_SERVER_PASSWORD` from the process table.
+ * Every OpenCode server CloudCLI should mirror.
  *
- * The CLI generates a random per-process password and only exposes it in its
- * own environment; there is no config file to read. Reading the process table
- * lets CloudCLI connect without the user copying the address or secret, which
- * is exactly how `opencode attach` behaves when given no arguments.
- */
-function discoverRunningServer(): { port: string | null; password: string | null } {
-  try {
-    const output = execFileSync('ps', ['eww', '-ax'], {
-      encoding: 'utf8',
-      maxBuffer: 16 * 1024 * 1024,
-    });
-
-    for (const line of output.split('\n')) {
-      // Only an actual `opencode serve` invocation, not an unrelated process
-      // that merely inherited the variable and mentions both words.
-      if (!/opencode(\.js)?\s+serve/.test(line)) {
-        continue;
-      }
-
-      const password = line.match(/OPENCODE_SERVER_PASSWORD=(\S+)/)?.[1] ?? null;
-      if (!password) {
-        continue;
-      }
-
-      // The CLI accepts both `--port=1234` and `--port 1234`.
-      const port = line.match(/--port[= ](\d+)/)?.[1] ?? null;
-      if (!port) {
-        continue;
-      }
-      return { port, password };
-    }
-  } catch {
-    // Process discovery is best-effort; fall back to defaults when it fails.
-  }
-
-  return { port: null, password: null };
-}
-
-/** Reads a v2 background service's `service.json` descriptor (`url` + `password`). */
-function readServiceDescriptor(filePath: string): OpenCodeServerConfig | null {
-  if (!existsSync(filePath)) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>;
-    const url = readString(parsed.url);
-    if (!url) {
-      return null;
-    }
-
-    const password = typeof parsed.password === 'string' ? parsed.password : '';
-    return { url, headers: buildAuthHeaders('opencode', password) };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Discovers the OpenCode v2 background services the desktop apps run.
- *
- * Each service writes `service.json` (url + password) under its own
- * `XDG_STATE_HOME/opencode`. Running `opencode-cli serve --service` processes
- * advertise that state home in their environment, and the default and
- * profile-scoped locations are checked directly as a fallback.
- */
-function discoverServiceServers(): OpenCodeServerConfig[] {
-  const descriptors: string[] = [];
-  const seenHomes = new Set<string>();
-  const addDescriptor = (stateHome: string) => {
-    if (!stateHome || seenHomes.has(stateHome)) {
-      return;
-    }
-    seenHomes.add(stateHome);
-    descriptors.push(path.join(stateHome, 'opencode', 'service.json'));
-  };
-
-  try {
-    const output = execFileSync('ps', ['eww', '-ax'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-    for (const line of output.split('\n')) {
-      if (!line.includes('opencode-cli') || !line.includes('serve')) {
-        continue;
-      }
-      const stateHome = line.match(/XDG_STATE_HOME=(\S+)/)?.[1];
-      if (stateHome) {
-        addDescriptor(stateHome);
-        continue;
-      }
-      const home = line.match(/(?:^|\s)HOME=(\S+)/)?.[1];
-      if (home) {
-        addDescriptor(path.join(home, '.local', 'state'));
-      }
-    }
-  } catch {
-    // Process discovery is best-effort; the fixed locations below still apply.
-  }
-
-  const home = os.homedir();
-  addDescriptor(path.join(home, '.local', 'state'));
-  addDescriptor(path.join(home, '.config'));
-  try {
-    for (const entry of readdirSync(path.join(home, '.opencode-profiles'))) {
-      addDescriptor(path.join(home, '.opencode-profiles', entry, 'state'));
-      addDescriptor(path.join(home, '.opencode-profiles', entry, 'config'));
-    }
-  } catch {
-    // No profile directory; nothing more to add.
-  }
-
-  const configs: OpenCodeServerConfig[] = [];
-  for (const descriptor of descriptors) {
-    const config = readServiceDescriptor(descriptor);
-    if (config) {
-      configs.push(config);
-    }
-  }
-  return configs;
-}
-
-/**
- * Resolves every OpenCode server CloudCLI should mirror.
- *
- * Explicit environment variables pin a single server. Otherwise the console's
- * advertised `opencode serve`, the desktop apps' v2 background services, and any
- * `opencode serve` discoverable through the process table are all included, so a
- * turn started on any of them reaches the phone. The v2 API is used against all
- * of them, because both 1.18 and 2.0 expose it.
+ * Exported for the module's tests; the discovery itself lives in shared utils
+ * so the bridge and the provider readers agree on the same server set.
  */
 export function resolveServerConfigs(): OpenCodeServerConfig[] {
-  const configuredUrl = process.env.OPENCODE_SERVER_URL?.trim();
-  const configuredPassword = process.env.OPENCODE_SERVER_PASSWORD;
-  if (configuredUrl || configuredPassword) {
-    return [{
-      url: configuredUrl || DEFAULT_SERVER_URL,
-      headers: buildAuthHeaders(process.env.OPENCODE_SERVER_USERNAME, configuredPassword),
-    }];
-  }
-
-  const configs: OpenCodeServerConfig[] = [];
-  const sharedUrl = readSharedOpenCodeServerUrl();
-  if (sharedUrl) {
-    configs.push({ url: sharedUrl, headers: {} });
-  }
-  configs.push(...discoverServiceServers());
-
-  const discovered = discoverRunningServer();
-  if (discovered.password) {
-    configs.push({
-      url: `http://127.0.0.1:${discovered.port ?? '4096'}`,
-      headers: buildAuthHeaders(process.env.OPENCODE_SERVER_USERNAME, discovered.password),
-    });
-  }
-
-  const unique = new Map<string, OpenCodeServerConfig>();
-  for (const config of configs) {
-    if (!unique.has(config.url)) {
-      unique.set(config.url, config);
-    }
-  }
-  if (unique.size === 0) {
-    unique.set(DEFAULT_SERVER_URL, { url: DEFAULT_SERVER_URL, headers: {} });
-  }
-  return [...unique.values()];
+  return resolveOpenCodeServerConfigs();
 }
 
 /** The primary server, used by callers that mirror a single instance. */
 export function resolveServerConfig(): OpenCodeServerConfig {
-  return resolveServerConfigs()[0];
+  return resolveOpenCodeServerConfigs()[0];
 }
 
 /** Maps a provider-native session id onto the app-facing id CloudCLI stores. */
@@ -379,11 +248,47 @@ function applySessionActivity(providerSessionId: string, isBusy: boolean): void 
     sendSessionTaskProgress(appSessionId, isBusy ? 'running' : 'finished', isBusy ? phase : '');
   }
 
+  if (wasBusy && !isBusy) {
+    notifyExternalRunCompleted(appSessionId, providerSessionId);
+  }
+
   if (!isBusy) {
     clearPendingInteractionsForSession(providerSessionId);
   }
 
   setExternalSessionActivity(appSessionId, PROVIDER, isBusy, isBusy ? phase : null);
+}
+
+/** True while a session is still waiting on an approval or a question. */
+function hasPendingInteraction(providerSessionId: string): boolean {
+  return Array.from(pendingPermissions.values()).some((entry) => entry.sessionId === providerSessionId)
+    || Array.from(pendingQuestions.values()).some((entry) => entry.sessionId === providerSessionId);
+}
+
+/**
+ * Pops the phone's "task completed" alert when an OpenCode turn finishes.
+ *
+ * A turn whose session sits in the chat-run registry is one CloudCLI started;
+ * its provider runtime already raises the same `run.stopped` alert, and the
+ * registry keeps the entry for a while after completion, so those are skipped
+ * rather than relying on the orchestrator's short dedupe window. A session
+ * still waiting on an approval or question has not finished either, so it is
+ * skipped too — the interaction alert covers that case.
+ */
+function notifyExternalRunCompleted(appSessionId: string, providerSessionId: string): void {
+  if (chatRunRegistry.getRun(appSessionId) || hasPendingInteraction(providerSessionId)) {
+    return;
+  }
+
+  notifyRunStopped({
+    userId: resolveNotificationUserId(),
+    provider: PROVIDER,
+    // The orchestrator's JavaScript signature under-types these two string
+    // fields as `null`; the provider runtimes cast them the same way.
+    sessionId: appSessionId as never,
+    sessionName: sessionsDb.getSessionName(appSessionId, PROVIDER) as never,
+    stopReason: 'completed',
+  });
 }
 
 /**
@@ -511,6 +416,100 @@ function normalizeOpenCodeQuestions(raw: unknown): OpenCodeQuestion[] {
   return questions;
 }
 
+/** The text the phone panel keys an answer by: the question it displays. */
+function questionTextForFormField(field: OpenCodeFormField, form: OpenCodeForm): string {
+  return field.description ?? field.title ?? form.title ?? '';
+}
+
+/** Converts an OpenCode v2 form into the shared question panel's shape. */
+function normalizeOpenCodeFormQuestions(form: OpenCodeForm): OpenCodeQuestion[] {
+  const questions: OpenCodeQuestion[] = [];
+  for (const field of form.fields ?? []) {
+    // External fields are browser hand-offs, not questions.
+    if (field.type === 'external') {
+      continue;
+    }
+
+    const question = questionTextForFormField(field, form).trim();
+    if (!question) {
+      continue;
+    }
+
+    const options: OpenCodeQuestionOption[] = [];
+    for (const option of field.options ?? []) {
+      const label = option.label ?? option.value;
+      if (label) {
+        options.push({ label, description: option.description ?? '' });
+      }
+    }
+
+    questions.push({
+      question,
+      header: field.title ?? form.title ?? '',
+      options,
+      multiSelect: field.type === 'multiselect',
+    });
+  }
+
+  return questions;
+}
+
+/** Reads one v2 form payload defensively; the event stream is untrusted input. */
+function readOpenCodeForm(value: unknown): OpenCodeForm | null {
+  const record = readRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const id = readString(record.id);
+  const sessionID = readString(record.sessionID);
+  if (!id || !sessionID) {
+    return null;
+  }
+
+  const fields: OpenCodeFormField[] = [];
+  if (Array.isArray(record.fields)) {
+    for (const entry of record.fields) {
+      const field = readRecord(entry);
+      if (!field) {
+        continue;
+      }
+
+      const options: OpenCodeFormOption[] = [];
+      if (Array.isArray(field.options)) {
+        for (const option of field.options) {
+          const optionRecord = readRecord(option);
+          if (!optionRecord) {
+            continue;
+          }
+          options.push({
+            value: readString(optionRecord.value) ?? undefined,
+            label: readString(optionRecord.label) ?? undefined,
+            description: readString(optionRecord.description) ?? undefined,
+          });
+        }
+      }
+
+      fields.push({
+        key: readString(field.key) ?? undefined,
+        title: readString(field.title) ?? undefined,
+        description: readString(field.description) ?? undefined,
+        type: readString(field.type) ?? undefined,
+        options,
+        custom: field.custom === true,
+      });
+    }
+  }
+
+  return {
+    id,
+    sessionID,
+    title: readString(record.title) ?? undefined,
+    metadata: readRecord(record.metadata) ?? undefined,
+    fields,
+  };
+}
+
 /** Registers live and recovered approvals through the same phone delivery path. */
 function registerPendingPermission(
   properties: Record<string, unknown>,
@@ -574,6 +573,9 @@ function broadcastPendingQuestion(entry: OpenCodePendingQuestion): void {
 /**
  * Registers a pending question and pushes it to every watching client as an
  * `AskUserQuestion` permission request, so the shared question panel renders it.
+ *
+ * `form` is set for questions OpenCode 2.0+ raised as forms; the reply then
+ * goes back through the form endpoints, keyed by each field's `key`.
  */
 function registerPendingQuestion(
   requestId: string,
@@ -581,6 +583,7 @@ function registerPendingQuestion(
   questions: OpenCodeQuestion[],
   serverUrl: string,
   directory?: string,
+  form: OpenCodeForm | null = null,
 ): void {
   if (!requestId || questions.length === 0 || pendingQuestions.has(requestId)
     || resolvedInteractions.has(requestId)) {
@@ -595,6 +598,7 @@ function registerPendingQuestion(
     appSessionId,
     serverUrl,
     questions,
+    form,
     receivedAt: new Date(),
   };
   pendingQuestions.set(requestId, entry);
@@ -603,6 +607,34 @@ function registerPendingQuestion(
   applySessionActivity(sessionId, true);
   sendSessionTaskProgress(appSessionId, 'running', '等待回答');
   broadcastPendingQuestion(entry);
+}
+
+/**
+ * Registers a v2 form the assistant is waiting on.
+ *
+ * Desktop servers (2.0+) implement the `question` tool as a form whose metadata
+ * is marked `kind: "question"`. Other forms (MCP elicitation, for one) are not
+ * questions and stay out of the approvals channel.
+ */
+function registerPendingForm(
+  rawForm: unknown,
+  sessionId: string,
+  serverUrl: string,
+  directory?: string,
+): void {
+  const form = readOpenCodeForm(rawForm);
+  if (!form || readRecord(form.metadata)?.kind !== 'question') {
+    return;
+  }
+
+  registerPendingQuestion(
+    form.id ?? '',
+    form.sessionID ?? sessionId,
+    normalizeOpenCodeFormQuestions(form),
+    serverUrl,
+    directory,
+    form,
+  );
 }
 
 /**
@@ -661,12 +693,45 @@ async function reconcilePendingQuestions(
   }
 }
 
-/** Tells watchers a question interaction ended and restores the run's progress label. */
+/**
+ * True while the server still reports the session as running.
+ *
+ * The local busy set only refreshes every 30 seconds, so checking it alone
+ * would pin a task spinner for a session nothing is running — a synthetic
+ * approval, or a run that already ended. An unreachable server keeps the
+ * previous busy state rather than dropping a real prompt's indicator.
+ */
+async function isProviderSessionActive(server: OpenCodeServer, sessionId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${server.config.url}/api/session/active`, {
+      headers: server.config.headers,
+    });
+    if (!response.ok) {
+      return true;
+    }
+
+    const body: unknown = await response.json();
+    // The API wraps its map once (`{ data: { <sessionId>: ... } }`).
+    const active = readRecord(readRecord(body)?.data);
+    return active ? Object.prototype.hasOwnProperty.call(active, sessionId) : true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Tells watchers an interaction ended and restores the run's progress label.
+ *
+ * When the settling server no longer reports the session as running, this
+ * releases the activity immediately instead of waiting for the next snapshot:
+ * the phone's poll then clears its spinner within a few seconds.
+ */
 function broadcastInteractionSettled(
   appSessionId: string,
   sessionId: string,
   requestId: string,
   kind: 'permission_resolved' | 'permission_cancelled',
+  serverUrl?: string,
 ): void {
   broadcastChatEvent(createNormalizedMessage({
     kind,
@@ -674,10 +739,28 @@ function broadcastInteractionSettled(
     sessionId: appSessionId,
     requestId,
   }));
-  if (busyProviderSessions.has(sessionId)) {
+
+  if (!busyProviderSessions.has(sessionId)) {
+    return;
+  }
+
+  const server = serverUrl ? findServer(serverUrl) : null;
+  if (!server) {
+    applySessionActivity(sessionId, true);
+    return;
+  }
+
+  void isProviderSessionActive(server, sessionId).then((active) => {
+    if (!active && !hasPendingInteraction(sessionId)) {
+      applySessionActivity(sessionId, false);
+      return;
+    }
     applySessionActivity(sessionId, true);
     sendSessionTaskProgress(appSessionId, 'running', getBusySessionPhase(sessionId));
-  }
+  }).catch(() => {
+    // The bridge may be shutting down between the probe and the update; a
+    // failed activity refresh is harmless.
+  });
 }
 
 /** Removes a pending question and tells watchers it was answered or dismissed. */
@@ -689,7 +772,7 @@ function settlePendingQuestion(requestId: string, kind: 'permission_resolved' | 
 
   pendingQuestions.delete(requestId);
   rememberId(resolvedInteractions, requestId);
-  broadcastInteractionSettled(entry.appSessionId, entry.sessionId, requestId, kind);
+  broadcastInteractionSettled(entry.appSessionId, entry.sessionId, requestId, kind, entry.serverUrl);
 }
 
 /**
@@ -711,6 +794,122 @@ function buildQuestionAnswers(entry: OpenCodePendingQuestion, decision: Provider
       .filter(Boolean);
   });
 }
+
+/**
+ * Turns the question panel's answer map into a v2 form's `Form.Answer`.
+ *
+ * The panel keys answers by the displayed question text, while a form expects
+ * each answer under its field `key`: multi-selects as a string array, single
+ * selects as one string. Fields the user left unanswered are omitted.
+ */
+function buildFormAnswers(
+  entry: OpenCodePendingQuestion,
+  decision: ProviderPermissionDecision,
+): Record<string, string | string[]> {
+  const updatedInput = readRecord(decision.updatedInput);
+  const rawAnswers = readRecord(updatedInput?.answers);
+  const answer: Record<string, string | string[]> = {};
+  const form = entry.form;
+  if (!rawAnswers || !form?.fields) {
+    return answer;
+  }
+
+  for (const field of form.fields) {
+    if (!field.key || field.type === 'external') {
+      continue;
+    }
+
+    const value = rawAnswers[questionTextForFormField(field, form)];
+    if (typeof value !== 'string' || !value.trim()) {
+      continue;
+    }
+
+    const labels = value
+      .split(', ')
+      .map((label) => label.trim())
+      .filter(Boolean);
+    if (labels.length === 0) {
+      continue;
+    }
+
+    answer[field.key] = field.type === 'multiselect' ? labels : labels[0];
+  }
+
+  return answer;
+}
+
+/** Posts one v2 form answer; a non-2xx response keeps the prompt retryable. */
+async function replyToOpenCodeForm(
+  server: OpenCodeServer,
+  entry: OpenCodePendingQuestion,
+  decision: ProviderPermissionDecision,
+): Promise<void> {
+  const response = await fetch(
+    `${server.config.url}/api/session/${encodeURIComponent(entry.sessionId)}/form/${encodeURIComponent(entry.requestId)}/reply`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...server.config.headers },
+      body: JSON.stringify({ answer: buildFormAnswers(entry, decision) }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Form reply failed with status ${response.status}`);
+  }
+}
+
+/** Cancels one v2 form. The server treats the tool call as aborted. */
+async function cancelOpenCodeForm(
+  server: OpenCodeServer,
+  entry: OpenCodePendingQuestion,
+): Promise<void> {
+  const response = await fetch(
+    `${server.config.url}/api/session/${encodeURIComponent(entry.sessionId)}/form/${encodeURIComponent(entry.requestId)}`,
+    { method: 'DELETE', headers: server.config.headers },
+  );
+  if (!response.ok) {
+    throw new Error(`Form cancel failed with status ${response.status}`);
+  }
+}
+
+/**
+ * Lists a session's pending v2 forms.
+ *
+ * Returns null when the server does not implement the form routes (older
+ * 1.18 servers answer 404), so callers can skip without treating it as an
+ * error. Transient failures throw and are retried by the next snapshot.
+ */
+async function listOpenCodeForms(
+  server: OpenCodeServer,
+  sessionId: string,
+  signal: AbortSignal,
+): Promise<OpenCodeForm[] | null> {
+  const response = await fetch(
+    `${server.config.url}/api/session/${encodeURIComponent(sessionId)}/form`,
+    { headers: server.config.headers, signal },
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Form list failed with status ${response.status}`);
+  }
+
+  const body: unknown = await response.json();
+  const data = Array.isArray(body) ? body : readRecord(body)?.data;
+  if (!Array.isArray(data)) {
+    return [];
+  }
+
+  const forms: OpenCodeForm[] = [];
+  for (const value of data) {
+    const form = readOpenCodeForm(value);
+    if (form) {
+      forms.push(form);
+    }
+  }
+  return forms;
+}
+
 
 function notifyUserOfPermission(sessionId: string, toolName: string | null): void {
   const userId = resolveNotificationUserId();
@@ -751,7 +950,9 @@ export function handleOpenCodeEvent(
   const payload = event.payload ?? event;
   const properties = readRecord(payload.properties) ?? readRecord(payload.data);
   const sessionId = readString(properties?.sessionID) ?? readString(properties?.sessionId)
-    ?? readString(readRecord(properties?.part)?.sessionID);
+    ?? readString(readRecord(properties?.part)?.sessionID)
+    // v2 form events carry the session on the form itself.
+    ?? readString(readRecord(properties?.form)?.sessionID);
   if (!sessionId) {
     return;
   }
@@ -789,7 +990,7 @@ export function handleOpenCodeEvent(
 
     pendingPermissions.delete(permissionId);
     rememberId(resolvedInteractions, permissionId);
-    broadcastInteractionSettled(entry.appSessionId, entry.sessionId, permissionId, 'permission_resolved');
+    broadcastInteractionSettled(entry.appSessionId, entry.sessionId, permissionId, 'permission_resolved', entry.serverUrl);
     return;
   }
 
@@ -811,6 +1012,23 @@ export function handleOpenCodeEvent(
 
   if (payload.type === 'question.rejected' || payload.type === 'question.v2.rejected') {
     settlePendingQuestion(readString(properties?.requestID) ?? '', 'permission_cancelled');
+    return;
+  }
+
+  // OpenCode 2.0+ desktop servers raise the `question` tool as a form: the
+  // session id sits on the form, and answering goes through the form API.
+  if (payload.type === 'form.created') {
+    registerPendingForm(readRecord(properties?.form), sessionId, server.config.url, directory);
+    return;
+  }
+
+  if (payload.type === 'form.replied') {
+    settlePendingQuestion(readString(properties?.id) ?? '', 'permission_resolved');
+    return;
+  }
+
+  if (payload.type === 'form.cancelled') {
+    settlePendingQuestion(readString(properties?.id) ?? '', 'permission_cancelled');
     return;
   }
 
@@ -856,7 +1074,10 @@ async function syncStatusSnapshot(server: OpenCodeServer, signal: AbortSignal): 
   const previousActive = activeProviderSessionsByServer.get(server.config.url) ?? new Set<string>();
   const activeIds = new Set<string>();
   if (activeResult[0].status === 'fulfilled') {
-    for (const providerSessionId of Object.keys(readRecord(activeResult[0].value.data) ?? {})) {
+    // The v2 endpoint wraps its map once more (`{ data: { <sessionId>: ... } }`).
+    // Reading the outer object's keys would yield the literal "data".
+    const activeData = readRecord(readRecord(activeResult[0].value.data)?.data) ?? {};
+    for (const providerSessionId of Object.keys(activeData)) {
       activeIds.add(providerSessionId);
       applySessionActivity(providerSessionId, true);
     }
@@ -879,11 +1100,22 @@ async function syncStatusSnapshot(server: OpenCodeServer, signal: AbortSignal): 
   }
   activeProviderSessionsByServer.set(server.config.url, activeIds);
 
-  // Pending approvals/questions, reconciled per directory.
-  const directories = new Set<string | undefined>([undefined, ...sessionDirectories.values()]);
+  // Pending approvals/questions, reconciled per directory. A directory that
+  // does not exist on disk cannot hold a live approval, and a server asked
+  // about a stale path answers HTTP 500 on every reconcile (the CLI's internal
+  // probe directories vanish when it exits), so dead paths are dropped here.
+  const directories = new Set<string | undefined>([undefined]);
+  const addDirectory = (directory: string): void => {
+    if (directory && existsSync(directory)) {
+      directories.add(directory);
+    }
+  };
+  for (const directory of sessionDirectories.values()) {
+    addDirectory(directory);
+  }
   for (const session of sessionsDb.getAllSessions()) {
     if (session.provider === PROVIDER && session.project_path) {
-      directories.add(session.project_path);
+      addDirectory(session.project_path);
     }
   }
   for (const directory of directories) {
@@ -902,7 +1134,7 @@ async function syncStatusSnapshot(server: OpenCodeServer, signal: AbortSignal): 
       for (const [id, entry] of pendingPermissions) {
         if (entry.serverUrl === server.config.url && entry.directory === directory && !requestIds.has(id)) {
           pendingPermissions.delete(id);
-          broadcastInteractionSettled(entry.appSessionId, entry.sessionId, id, 'permission_cancelled');
+          broadcastInteractionSettled(entry.appSessionId, entry.sessionId, id, 'permission_cancelled', entry.serverUrl);
         }
       }
       for (const request of requests) {
@@ -915,6 +1147,11 @@ async function syncStatusSnapshot(server: OpenCodeServer, signal: AbortSignal): 
       const requests = readRequestList(questionResult.value.data);
       const requestIds = new Set(requests.map((request) => readString(request.id)));
       for (const [id, entry] of pendingQuestions) {
+        // Form-backed questions (OpenCode 2.0+) are not part of the legacy
+        // list; the form sweep below owns their lifecycle.
+        if (entry.form) {
+          continue;
+        }
         if (entry.serverUrl === server.config.url && entry.directory === directory && !requestIds.has(id)) {
           settlePendingQuestion(id, 'permission_cancelled');
         }
@@ -930,6 +1167,53 @@ async function syncStatusSnapshot(server: OpenCodeServer, signal: AbortSignal): 
       }
     }
   }
+
+  // v2 forms (OpenCode 2.0+ desktop servers) are the question mechanism there,
+  // listed per session rather than per location. Only sessions this server owns
+  // are queried; the first 404 stops the sweep because it means the server
+  // predates the form routes, and transient failures wait for the next pass.
+  const formSessions = new Set<string>();
+  for (const entry of pendingQuestions.values()) {
+    if (entry.serverUrl === server.config.url && entry.form) {
+      formSessions.add(entry.sessionId);
+    }
+  }
+  for (const session of sessionsDb.getAllSessions()) {
+    if (session.provider !== PROVIDER || !session.provider_session_id) {
+      continue;
+    }
+    if (session.open_code_server_id && server.config.id
+      && session.open_code_server_id !== server.config.id) {
+      continue;
+    }
+    formSessions.add(session.provider_session_id);
+  }
+  for (const providerSessionId of formSessions) {
+    if (signal.aborted) {
+      return;
+    }
+
+    let forms: OpenCodeForm[] | null;
+    try {
+      forms = await listOpenCodeForms(server, providerSessionId, signal);
+    } catch {
+      continue;
+    }
+    if (!forms) {
+      break;
+    }
+
+    const formIds = new Set(forms.map((form) => form.id));
+    for (const [id, entry] of pendingQuestions) {
+      if (entry.serverUrl === server.config.url && entry.form
+        && entry.sessionId === providerSessionId && !formIds.has(id)) {
+        settlePendingQuestion(id, 'permission_cancelled');
+      }
+    }
+    for (const form of forms) {
+      registerPendingForm(form, providerSessionId, server.config.url, sessionDirectories.get(providerSessionId));
+    }
+  }
 }
 
 async function runEventLoop(server: OpenCodeServer, signal: AbortSignal): Promise<void> {
@@ -940,16 +1224,34 @@ async function runEventLoop(server: OpenCodeServer, signal: AbortSignal): Promis
       // The v2 event stream carries every project's events, including the
       // location needed to find and answer each prompt.
       const { stream } = await server.client.v2.event.subscribe({ signal, sseMaxRetryAttempts: 1 });
-      for await (const event of stream as AsyncGenerator<OpenCodeEventShape>) {
-        if (signal.aborted) {
-          break;
+      // A dropped `session.idle` event would otherwise leave the phone's
+      // progress notification stuck on "processing" until the next reconnect.
+      // Re-reading the server's authoritative active set heals that within one
+      // interval; the guard keeps overlapping snapshots from interleaving.
+      let reconciling = false;
+      const reconcileTimer = setInterval(() => {
+        if (reconciling || signal.aborted) {
+          return;
         }
-        retryDelay = INITIAL_RETRY_DELAY_MS;
-        if ((event.payload ?? event).type === 'server.connected') {
-          // Covers requests raised between the snapshot and stream attachment.
-          await syncStatusSnapshot(server, signal);
+        reconciling = true;
+        void syncStatusSnapshot(server, signal)
+          .catch(() => {})
+          .finally(() => { reconciling = false; });
+      }, STATUS_RECONCILE_INTERVAL_MS);
+      try {
+        for await (const event of stream as AsyncGenerator<OpenCodeEventShape>) {
+          if (signal.aborted) {
+            break;
+          }
+          retryDelay = INITIAL_RETRY_DELAY_MS;
+          if ((event.payload ?? event).type === 'server.connected') {
+            // Covers requests raised between the snapshot and stream attachment.
+            await syncStatusSnapshot(server, signal);
+          }
+          handleOpenCodeEvent(event, server);
         }
-        handleOpenCodeEvent(event, server);
+      } finally {
+        clearInterval(reconcileTimer);
       }
       throw new Error('OpenCode event stream ended');
     } catch (error) {
@@ -991,13 +1293,18 @@ export function stopOpenCodeBridge(): void {
   servers = [];
   activeProviderSessionsByServer.clear();
   for (const providerSessionId of busyProviderSessions) {
-    setExternalSessionActivity(resolveAppSessionId(providerSessionId), PROVIDER, false);
+    const appSessionId = resolveAppSessionId(providerSessionId);
+    // Clear the phone's persistent task entry too, not just the websocket
+    // activity flag; otherwise the notification stays on "processing".
+    sendSessionTaskProgress(appSessionId, 'finished', '');
+    setExternalSessionActivity(appSessionId, PROVIDER, false);
   }
   busyProviderSessions.clear();
   sessionDirectories.clear();
   resolvingInteractions.clear();
   resolvedInteractions.clear();
   announcedPermissions.clear();
+  permissionReplyDialects.clear();
   pendingPermissions.clear();
   pendingQuestions.clear();
 }
@@ -1063,17 +1370,13 @@ export const openCodePermissionGateway: ProviderRuntimePermissionGateway = {
     }
 
     const reply = decision.allow ? (decision.rememberEntry ? 'always' : 'once') : 'reject';
-    const options = { throwOnError: true as const };
     resolvingInteractions.add(requestId);
-    const request = server.client.v2.session.permission.reply(
-      { sessionID: entry.sessionId, requestID: requestId, reply, message: decision.message },
-      options,
-    );
+    const request = replyToOpenCodePermission(server, entry, reply, decision.message);
     void request
       .then(() => {
         rememberId(resolvedInteractions, requestId);
         if (pendingPermissions.delete(requestId)) {
-          broadcastInteractionSettled(entry.appSessionId, entry.sessionId, requestId, 'permission_resolved');
+          broadcastInteractionSettled(entry.appSessionId, entry.sessionId, requestId, 'permission_resolved', entry.serverUrl);
         }
       })
       .catch((error: unknown) => {
@@ -1091,7 +1394,72 @@ export const openCodePermissionGateway: ProviderRuntimePermissionGateway = {
 };
 
 /**
+ * How one server addresses a permission reply.
+ *
+ * OpenCode 2.0 renamed the body field from `reply` to `decision` and rejects
+ * the old one outright (`Missing key at ["decision"]`), while 1.x only reads
+ * `reply`. The dialect is probed once per server from `/global/health`, which
+ * 1.x answers with JSON and 2.x serves as its web app.
+ */
+const permissionReplyDialects = new Map<string, 'decision' | 'reply'>();
+
+async function resolvePermissionReplyDialect(server: OpenCodeServer): Promise<'decision' | 'reply'> {
+  const cached = permissionReplyDialects.get(server.config.url);
+  if (cached) {
+    return cached;
+  }
+
+  let dialect: 'decision' | 'reply' = 'decision';
+  try {
+    const response = await fetch(`${server.config.url}/global/health`, {
+      headers: server.config.headers,
+    });
+    const contentType = response.headers.get('content-type') ?? '';
+    if (response.ok && contentType.includes('application/json')) {
+      dialect = 'reply';
+    }
+  } catch {
+    // An unreachable probe keeps the newer dialect; the reply itself surfaces
+    // any real connectivity problem.
+  }
+
+  permissionReplyDialects.set(server.config.url, dialect);
+  return dialect;
+}
+
+/** Sends one permission decision in the dialect its server understands. */
+async function replyToOpenCodePermission(
+  server: OpenCodeServer,
+  entry: OpenCodePendingPermission,
+  reply: 'once' | 'always' | 'reject',
+  message: string | undefined,
+): Promise<void> {
+  if (await resolvePermissionReplyDialect(server) === 'reply') {
+    await server.client.v2.session.permission.reply(
+      { sessionID: entry.sessionId, requestID: entry.permissionId, reply, message },
+      { throwOnError: true },
+    );
+    return;
+  }
+
+  const response = await fetch(
+    `${server.config.url}/api/session/${encodeURIComponent(entry.sessionId)}/permission/${encodeURIComponent(entry.permissionId)}/reply`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...server.config.headers },
+      body: JSON.stringify({ decision: reply, ...(message ? { message } : {}) }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Permission reply failed with status ${response.status}`);
+  }
+}
+
+/**
  * Answers through the endpoint matching the event, retaining failed submissions.
+ *
+ * Questions raised as v2 forms go through the form API; legacy 1.18 questions
+ * go through the SDK's session question reply/reject endpoints.
  */
 function resolveOpenCodeQuestion(entry: OpenCodePendingQuestion, decision: ProviderPermissionDecision): void {
   const server = findServer(entry.serverUrl);
@@ -1101,23 +1469,30 @@ function resolveOpenCodeQuestion(entry: OpenCodePendingQuestion, decision: Provi
 
   resolvingInteractions.add(entry.requestId);
   const options = { throwOnError: true as const };
-  const answers = buildQuestionAnswers(entry, decision);
-  const request = decision.allow
-    ? server.client.v2.session.question.reply(
-      { sessionID: entry.sessionId, requestID: entry.requestId, questionV2Reply: { answers } },
-      options,
-    )
-    : server.client.v2.session.question.reject(
-      { sessionID: entry.sessionId, requestID: entry.requestId },
-      options,
-    );
+  let request: Promise<unknown>;
+  if (entry.form) {
+    request = decision.allow
+      ? replyToOpenCodeForm(server, entry, decision)
+      : cancelOpenCodeForm(server, entry);
+  } else {
+    const answers = buildQuestionAnswers(entry, decision);
+    request = decision.allow
+      ? server.client.v2.session.question.reply(
+        { sessionID: entry.sessionId, requestID: entry.requestId, questionV2Reply: { answers } },
+        options,
+      )
+      : server.client.v2.session.question.reject(
+        { sessionID: entry.sessionId, requestID: entry.requestId },
+        options,
+      );
+  }
 
   void Promise.resolve(request)
     .then(() => {
       rememberId(resolvedInteractions, entry.requestId);
       if (pendingQuestions.delete(entry.requestId)) {
         broadcastInteractionSettled(entry.appSessionId, entry.sessionId, entry.requestId,
-          decision.allow ? 'permission_resolved' : 'permission_cancelled');
+          decision.allow ? 'permission_resolved' : 'permission_cancelled', entry.serverUrl);
       }
     })
     .catch((error: unknown) => {

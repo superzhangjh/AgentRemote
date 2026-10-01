@@ -525,6 +525,10 @@ export const runMigrations = (db: Database) => {
     rebuildSessionsTableWithProjectSchema(db);
     migrateLegacySessionNames(db);
     addProviderSessionIdMapping(db);
+    addColumnToTableIfNotExists(
+      db, 'sessions', getTableInfo(db, 'sessions').map((column) => column.name),
+      'open_code_server_id', 'TEXT',
+    );
     addSessionModelColumn(db);
     addSessionEffortColumn(db);
     addForkedFromSessionIdColumn(db);

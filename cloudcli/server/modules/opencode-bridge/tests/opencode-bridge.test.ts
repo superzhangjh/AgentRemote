@@ -49,6 +49,8 @@ test('bridge mirrors the server advertised by the AgentRemote descriptor', () =>
     assert.deepEqual(resolveServerConfig(), {
       url: 'http://127.0.0.1:56083',
       headers: {},
+      id: 'agentremote',
+      label: 'OpenCode · AgentRemote CLI',
     });
   });
 });
@@ -115,6 +117,8 @@ test('resolveServerConfigs discovers a v2 background service descriptor', () => 
     assert.deepEqual(service?.headers, {
       Authorization: `Basic ${Buffer.from('opencode:pw', 'utf8').toString('base64')}`,
     });
+    assert.match(service?.id ?? '', /^service:[a-f0-9]{16}$/);
+    assert.equal(service?.label, 'OpenCode · Default');
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     restore('HOME', previousHome);

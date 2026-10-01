@@ -1,7 +1,12 @@
 import React, { memo, useMemo, useCallback } from 'react';
 
 import type { DiffLine, Project,ToolStatus } from '@/shared/types';
-import { formatToolDisplayName, getToolConfig } from '@/modules/chat/tools/configs/toolConfigs';
+import {
+  formatToolDisplayName,
+  getToolConfig,
+  isDismissedQuestionResult,
+  resolveCanonicalToolName,
+} from '@/modules/chat/tools/configs/toolConfigs';
 import { OneLineDisplay } from '@/modules/chat/tools/OneLineDisplay';
 import { BashCommandDisplay } from '@/modules/chat/tools/BashCommandDisplay';
 import { CollapsibleDisplay } from '@/modules/chat/tools/CollapsibleDisplay';
@@ -35,14 +40,15 @@ type ToolRendererProps = {
 };
 
 function getToolCategory(toolName: string): string {
-  if (['Edit', 'Write', 'ApplyPatch'].includes(toolName)) return 'edit';
-  if (['Grep', 'Glob'].includes(toolName)) return 'search';
-  if (toolName === 'Bash') return 'bash';
-  if (['TodoWrite', 'TodoRead'].includes(toolName)) return 'todo';
-  if (['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'].includes(toolName)) return 'task';
-  if (toolName === 'Task') return 'agent';
-  if (toolName === 'exit_plan_mode' || toolName === 'ExitPlanMode') return 'plan';
-  if (toolName === 'AskUserQuestion') return 'question';
+  const canonicalName = resolveCanonicalToolName(toolName);
+  if (['Edit', 'Write', 'ApplyPatch'].includes(canonicalName)) return 'edit';
+  if (['Grep', 'Glob'].includes(canonicalName)) return 'search';
+  if (canonicalName === 'Bash') return 'bash';
+  if (['TodoWrite', 'TodoRead'].includes(canonicalName)) return 'todo';
+  if (['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'].includes(canonicalName)) return 'task';
+  if (canonicalName === 'Task') return 'agent';
+  if (canonicalName === 'exit_plan_mode' || canonicalName === 'ExitPlanMode') return 'plan';
+  if (canonicalName === 'AskUserQuestion') return 'question';
   return 'default';
 }
 
@@ -54,7 +60,7 @@ const CLAUDE_DENIAL_MESSAGES = [
   'permission request cancelled',
 ];
 
-function deriveToolStatus(toolResult: any, reportedStatus?: string): ToolStatus {
+function deriveToolStatus(toolName: string, toolResult: any, reportedStatus?: string): ToolStatus {
   // Codex reports a command's lifecycle directly, so a row can show as running
   // while its output is still streaming in rather than only once it finishes.
   if (reportedStatus === 'in_progress') return 'running';
@@ -63,6 +69,10 @@ function deriveToolStatus(toolResult: any, reportedStatus?: string): ToolStatus 
   if (toolResult.isError) {
     const content = String(toolResult.content || '').toLowerCase().trim();
     if (CLAUDE_DENIAL_MESSAGES.some((msg) => content.includes(msg))) {
+      return 'denied';
+    }
+    // A dismissed question is a deliberate user action, not a failure.
+    if (isDismissedQuestionResult(toolName, toolResult)) {
       return 'denied';
     }
     return 'error';
@@ -104,8 +114,8 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
 
   // Only derive and show status badge on input renders
   const toolStatus = useMemo(
-    () => mode === 'input' ? deriveToolStatus(toolResult, reportedStatus) : undefined,
-    [mode, toolResult, reportedStatus],
+    () => mode === 'input' ? deriveToolStatus(toolName, toolResult, reportedStatus) : undefined,
+    [toolName, mode, toolResult, reportedStatus],
   );
 
   const handleAction = useCallback(() => {
@@ -206,7 +216,10 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
       ? displayConfig.title(parsedData)
       : displayConfig.title || 'Details';
 
-    const defaultOpen = !compactToolDetails && (displayConfig.defaultOpen !== undefined
+    // A question the model is waiting on must read as a question at a glance,
+    // so it stays expanded even where compact mode collapses every other card.
+    const alwaysOpen = getToolCategory(toolName) === 'question';
+    const defaultOpen = (alwaysOpen || !compactToolDetails) && (displayConfig.defaultOpen !== undefined
       ? displayConfig.defaultOpen
       : false);
 

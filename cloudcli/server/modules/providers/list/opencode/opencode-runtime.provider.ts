@@ -1,7 +1,8 @@
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
-import { createOpenCodeServerClient } from '@/modules/providers/list/opencode/opencode-server.js';
+import { createOpenCodeServerClient, findOpenCodeServerConfig, findOpenCodeSessionServerConfig } from '@/modules/providers/list/opencode/opencode-server.js';
+import { OpenCodeProviderModels } from '@/modules/providers/list/opencode/opencode-models.provider.js';
 import { appendFilesInputTag, appendImagesInputTag } from '@/shared/image-attachments.js';
 import type {
   AnyRecord,
@@ -105,6 +106,25 @@ function formatToolContent(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function formatOpenCodeError(value: unknown): string {
+  let error = value;
+  if (typeof error === 'string') {
+    try {
+      error = JSON.parse(error) as unknown;
+    } catch {
+      return String(error);
+    }
+  }
+  const record = readRecord(error);
+  const message = readString(readRecord(record?.data)?.message)
+    ?? readString(record?.message)
+    ?? (error instanceof Error ? error.message : formatToolContent(error));
+  if (/self.signed.certificate/i.test(message)) {
+    return 'The selected OpenCode instance cannot verify its model provider certificate (self signed certificate). Check that instance’s proxy or certificate settings, or start a new chat with another instance.';
+  }
+  return message || 'OpenCode run failed';
 }
 
 /**
@@ -304,7 +324,17 @@ async function runOpenCodeSession(
   // Process-map key: the app session id when the caller supplied one, so
   // abort-by-app-id always works.
   const processKey = (sessionId as string) || Date.now().toString();
-  const client = createOpenCodeServerClient();
+  const serverId = typeof options.openCodeServerId === 'string' ? options.openCodeServerId : null;
+  const serverConfig = serverId
+    ? findOpenCodeServerConfig(serverId)
+    : providerSessionId ? await findOpenCodeSessionServerConfig(providerSessionId) : undefined;
+  if (serverId && !serverConfig) {
+    throw new Error('Selected OpenCode instance is unavailable. Restart it or start a new chat with another instance.');
+  }
+  if (providerSessionId && !serverConfig) {
+    throw new Error('The OpenCode instance for this session is unavailable. Restart it before continuing.');
+  }
+  const client = createOpenCodeServerClient(serverConfig);
   const controller = new AbortController();
 
   let capturedSessionId: string | null = providerSessionId;
@@ -316,6 +346,15 @@ async function runOpenCodeSession(
   let streamError: string | null = null;
   const seenTextLengths = new Map<string, number>();
   const toolStates = new Map<string, string>();
+  /**
+   * Message ids OpenCode reported as user messages during this run.
+   *
+   * OpenCode emits `message.part.updated` for the prompt the user just sent
+   * too, so without this a raw text part would stream back as assistant output
+   * and the phone, which accumulates every delta into one bubble, rendered the
+   * user's own words at the start of the reply.
+   */
+  const userMessageIds = new Set<string>();
 
   const run: ActiveOpenCodeRun = {
     client,
@@ -390,12 +429,22 @@ async function runOpenCodeSession(
       return;
     }
 
+    // User prompts are mirrored back as part updates by the server. The client
+    // already shows the prompt it sent, so streaming it again makes the reply
+    // look like it repeats the user's message.
+    const partMessageId = readString(part.messageID);
+    if (partMessageId && userMessageIds.has(partMessageId)) {
+      return;
+    }
+
     const type = readString(part.type);
     if (type === 'text' || type === 'reasoning') {
       const fullText = typeof part.text === 'string' ? part.text : '';
       const previous = seenTextLengths.get(partId) ?? 0;
       if (fullText.length <= previous) {
-        seenTextLengths.set(partId, fullText.length);
+        // Keep the high-water mark. An empty or stale update must not reset it,
+        // or the next update would re-send the whole part as a delta and the
+        // reply would contain the same text twice.
         return;
       }
 
@@ -456,7 +505,7 @@ async function runOpenCodeSession(
     }
 
     if (info.error != null && !streamError) {
-      streamError = formatToolContent(info.error) || 'OpenCode run failed';
+      streamError = formatOpenCodeError(info.error);
     }
   };
 
@@ -486,15 +535,18 @@ async function runOpenCodeSession(
       return true;
     }
     if (type === 'session.error') {
-      const error = readRecord(properties.error);
-      streamError = readString(error?.message)
-        ?? readString(properties.message)
-        ?? formatToolContent(properties.error)
-        ?? 'OpenCode session error';
+      streamError = formatOpenCodeError(properties.error ?? properties.message);
       return true;
     }
     if (type === 'message.updated') {
-      handleAssistantMessage(readRecord(properties.info));
+      const info = readRecord(properties.info);
+      if (readString(info?.role) === 'user') {
+        const userMessageId = readString(info?.id);
+        if (userMessageId) {
+          userMessageIds.add(userMessageId);
+        }
+      }
+      handleAssistantMessage(info);
       return false;
     }
     if (type === 'message.part.updated' && part) {
@@ -509,7 +561,9 @@ async function runOpenCodeSession(
     const resolvedModel = await context.resolveResumeModel(sessionId as string | undefined, model as string | undefined);
     let effortModels: AnyRecord | undefined;
     try {
-      effortModels = await context.getProviderModels() as AnyRecord;
+      effortModels = (serverId
+        ? await new OpenCodeProviderModels().getSupportedModels(serverId)
+        : await context.getProviderModels()) as AnyRecord;
     } catch (error) {
       console.warn('[OpenCode] Unable to load provider models for effort validation:', error);
     }
@@ -617,7 +671,7 @@ async function runOpenCodeSession(
       return;
     }
 
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatOpenCodeError(error);
     if (!completeSent) {
       completeSent = true;
       ws.send(createNormalizedMessage({

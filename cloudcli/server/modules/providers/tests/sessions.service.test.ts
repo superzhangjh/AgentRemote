@@ -62,6 +62,24 @@ test('app sessions without message text receive a stable fallback name', { concu
   });
 });
 
+test('OpenCode app sessions retain the selected instance and reject unknown instances', { concurrency: false }, async () => {
+  const previousUrl = process.env.OPENCODE_SERVER_URL;
+  process.env.OPENCODE_SERVER_URL = 'http://127.0.0.1:49999';
+  try {
+    await withIsolatedDatabase(() => {
+      const result = sessionsService.createAppSession('opencode', '/tmp/opencode-choice', 'hello', 'configured');
+      assert.equal(sessionsDb.getSessionById(result.sessionId)?.open_code_server_id, 'configured');
+      assert.throws(
+        () => sessionsService.createAppSession('opencode', '/tmp/opencode-choice', 'hello', 'missing'),
+        /unavailable/,
+      );
+    });
+  } finally {
+    if (previousUrl === undefined) delete process.env.OPENCODE_SERVER_URL;
+    else process.env.OPENCODE_SERVER_URL = previousUrl;
+  }
+});
+
 test('provider session id is unavailable until the provider assigns one', { concurrency: false }, async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('pending-app-session', 'claude', '/tmp/session-id-copy-project');
@@ -190,4 +208,60 @@ test('history pages are sliced from the cached full transcript and see appended 
   } finally {
     await rm(transcriptDirectory, { recursive: true, force: true });
   }
+});
+
+test('force-deleting an OpenCode conversation records a tombstone for the indexer', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createSession(
+      'ses_tombstone_target',
+      'opencode',
+      '/tmp/opencode-tombstone-project',
+      'Deleted conversation',
+    );
+    assert.ok(sessionsDb.getSessionById('ses_tombstone_target'));
+
+    await sessionsService.deleteOrArchiveSessionById('ses_tombstone_target', { force: true });
+
+    // The provider still lists the conversation, so the tombstone is what
+    // keeps the synchronizer from importing it straight back into the sidebar.
+    assert.equal(sessionsDb.getSessionById('ses_tombstone_target'), null);
+    assert.equal(sessionsDb.isProviderSessionSuperseded('ses_tombstone_target', 'opencode'), true);
+  });
+});
+
+test('batch delete archives by default, force-deletes on request and skips missing rows', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createSession('batch-archive', 'claude', '/tmp/batch-delete-project', 'Archive me');
+    sessionsDb.createSession('batch-force', 'claude', '/tmp/batch-delete-project', 'Delete me');
+
+    const archived = await sessionsService.deleteOrArchiveSessionsByIds(
+      ['batch-archive', 'missing-session'],
+      { force: false },
+    );
+
+    assert.deepEqual(archived, {
+      results: [
+        { sessionId: 'batch-archive', action: 'archived', deletedFromDisk: false },
+        { sessionId: 'missing-session', action: 'skipped', deletedFromDisk: false },
+      ],
+      failures: [],
+    });
+    assert.equal(sessionsDb.getSessionById('batch-archive')?.isArchived, 1);
+
+    const deleted = await sessionsService.deleteOrArchiveSessionsByIds(
+      ['batch-archive', 'batch-force'],
+      { force: true, deletedFromDisk: false },
+    );
+
+    assert.deepEqual(
+      deleted.results.map((result) => [result.sessionId, result.action]),
+      [
+        ['batch-archive', 'deleted'],
+        ['batch-force', 'deleted'],
+      ],
+    );
+    assert.deepEqual(deleted.failures, []);
+    assert.equal(sessionsDb.getSessionById('batch-archive'), null);
+    assert.equal(sessionsDb.getSessionById('batch-force'), null);
+  });
 });

@@ -79,6 +79,24 @@ function ChatInterface({
   const [openCodeServers, setOpenCodeServers] = useState<Array<{ id: string; label: string; url: string }>>([]);
   const [openCodeServerId, setOpenCodeServerId] = useState<string>('');
   const [openCodeServersError, setOpenCodeServersError] = useState<string | null>(null);
+  // Existing chats read their pinned instance from the session record before loading its models.
+  const [pinnedOpenCodeServer, setPinnedOpenCodeServer] = useState<{ sessionId: string; id: string | null } | null>(null);
+
+  useEffect(() => {
+    const sessionId = selectedSession?.id;
+    if (!sessionId) return;
+    let cancelled = false;
+    void api.sessionDetails(sessionId).then(async (response) => {
+      if (!response.ok) return;
+      const body = await response.json();
+      if (!cancelled) setPinnedOpenCodeServer({ sessionId, id: body?.data?.openCodeServerId ?? null });
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [selectedSession?.id]);
+
+  const modelOpenCodeServerId = selectedSession
+    ? (pinnedOpenCodeServer?.sessionId === selectedSession.id ? pinnedOpenCodeServer.id ?? undefined : undefined)
+    : openCodeServerId || undefined;
 
   const toggleFastMode = useCallback(() => setFastMode((current) => {
     localStorage.setItem('codex-fast-mode', String(!current));
@@ -127,6 +145,7 @@ function ChatInterface({
     cyclePermissionMode,
     providerModelCatalog,
     providerModelsLoading,
+    loadedOpenCodeServerId,
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,
@@ -136,6 +155,7 @@ function ChatInterface({
   } = useChatProviderState({
     selectedSession,
     selectedProject,
+    openCodeServerId: modelOpenCodeServerId,
   });
 
   const {
@@ -176,26 +196,48 @@ function ChatInterface({
   });
 
   useEffect(() => {
-    if (provider !== 'opencode' || selectedSession || currentSessionId) return;
+    if (provider !== 'opencode' || selectedSession?.id || currentSessionId) return;
     let cancelled = false;
-    void api.providers.openCodeServers().then(async (response) => {
+    const refresh = () => { void api.providers.openCodeServers().then(async (response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = await response.json();
-      const servers = Array.isArray(body?.data) ? body.data as Array<{ id: string; label: string; url: string }> : [];
+      const servers = (Array.isArray(body?.data) ? body.data as Array<{ id: string; label: string; url: string }> : [])
+        .map((server) => ({
+          ...server,
+          label: localStorage.getItem(`open-code-server-label:${server.id}`) || server.label,
+        }));
       if (cancelled) return;
       setOpenCodeServers(servers);
-      setOpenCodeServersError(servers.length ? null : '未找到可用的 OpenCode 服务');
+      setOpenCodeServersError(servers.length ? null : t('input.noOpenCodeInstances'));
       const preferred = localStorage.getItem('preferred-open-code-server');
-      setOpenCodeServerId(servers.find((server) => server.id === preferred)?.id ?? servers[0]?.id ?? '');
+      const desktopServers = servers.filter((server) => server.id.startsWith('service:'));
+      const defaults = desktopServers.length ? desktopServers : servers;
+      setOpenCodeServerId(defaults.find((server) => server.id === preferred)?.id ?? defaults[0]?.id ?? '');
     }).catch(() => {
-      if (!cancelled) setOpenCodeServersError('无法读取 OpenCode 服务');
-    });
-    return () => { cancelled = true; };
-  }, [provider, selectedSession?.id, currentSessionId]);
+      if (!cancelled) {
+        setOpenCodeServers([]);
+        setOpenCodeServerId('');
+        setOpenCodeServersError(t('input.openCodeInstancesFailed'));
+      }
+    }); };
+    refresh();
+    const timer = window.setInterval(refresh, 10_000);
+    window.addEventListener('agentremote:resume', refresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('agentremote:resume', refresh);
+    };
+  }, [provider, selectedSession?.id, currentSessionId, t]);
 
   const handleSelectOpenCodeServer = useCallback((id: string) => {
     setOpenCodeServerId(id);
     localStorage.setItem('preferred-open-code-server', id);
+  }, []);
+
+  const handleRenameOpenCodeServer = useCallback((id: string, label: string) => {
+    localStorage.setItem(`open-code-server-label:${id}`, label);
+    setOpenCodeServers((current) => current.map((item) => item.id === id ? { ...item, label } : item));
   }, []);
   // Brand-new conversation: the composer allocated a stable session id via
   // the session gateway before the first send. Record it locally and put it
@@ -262,6 +304,9 @@ function ChatInterface({
     currentSessionId,
     provider,
     openCodeServerId,
+    openCodeModelsReady: loadedOpenCodeServerId === openCodeServerId
+      && !providerModelsLoading
+      && currentProviderModelOptions.some((option) => option.value === currentProviderModel),
     permissionMode,
     cyclePermissionMode,
     currentProviderModel,
@@ -597,9 +642,12 @@ function ChatInterface({
           availablePermissionModes={availablePermissionModes}
           onSelectPermissionMode={selectPermissionMode}
           providerLabel={selectedProviderLabel}
-          openCodeServers={provider === 'opencode' && !selectedSession && !currentSessionId ? openCodeServers : undefined}
+          openCodeServers={provider === 'opencode' && !selectedSession && !currentSessionId && openCodeServers.filter((server) => server.id.startsWith('service:')).length > 1
+            ? openCodeServers.filter((server) => server.id.startsWith('service:'))
+            : undefined}
           selectedOpenCodeServerId={openCodeServerId}
           onSelectOpenCodeServer={handleSelectOpenCodeServer}
+          onRenameOpenCodeServer={handleRenameOpenCodeServer}
           openCodeServersError={openCodeServersError}
           effort={currentProviderEffort}
           availableEffortOptions={currentProviderEffortOptions}

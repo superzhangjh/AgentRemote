@@ -10,6 +10,7 @@ import type {
   TouchEvent,
 } from 'react';
 import { useDropzone } from 'react-dropzone';
+import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
@@ -36,6 +37,7 @@ type UseChatComposerStateArgs = {
   currentSessionId: string | null;
   provider: LLMProvider;
   openCodeServerId?: string;
+  openCodeModelsReady?: boolean;
   permissionMode: PermissionMode | string;
   cyclePermissionMode: () => void;
   resolvePermissionModeForProvider: (provider: LLMProvider, requestedMode: PermissionMode | string) => PermissionMode;
@@ -161,6 +163,7 @@ export function useChatComposerState({
   currentSessionId,
   provider,
   openCodeServerId,
+  openCodeModelsReady,
   permissionMode,
   cyclePermissionMode,
   resolvePermissionModeForProvider,
@@ -180,6 +183,7 @@ export function useChatComposerState({
   addMessage,
   setIsUserScrolledUp,
 }: UseChatComposerStateArgs) {
+  const { t } = useTranslation('chat');
   // The composer text together with the chat scope it belongs to. They are one
   // state rather than a value plus a ref because they have to move in lockstep:
   // on a session switch there is one commit where the scope has already changed
@@ -775,9 +779,13 @@ export function useChatComposerState({
         if (provider === 'opencode' && !openCodeServerId) {
           addMessage({
             type: 'error',
-            content: '请先选择一个可用的 OpenCode 实例。',
+            content: t('input.chooseOpenCodeInstance'),
             timestamp: new Date(),
           });
+          return;
+        }
+        if (provider === 'opencode' && !openCodeModelsReady) {
+          addMessage({ type: 'error', content: t('input.waitForOpenCodeModels'), timestamp: new Date() });
           return;
         }
         let createdSessionName = sessionSummary;
@@ -903,6 +911,8 @@ export function useChatComposerState({
       onSessionEstablished,
       provider,
       openCodeServerId,
+      openCodeModelsReady,
+      t,
       recordSentMessage,
       resetCommandMenuState,
       scrollToBottom,

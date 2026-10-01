@@ -8,6 +8,7 @@ import { providerTokenUsageService } from '@/modules/providers/services/provider
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { findOpenCodeServerConfig, listOpenCodeServers } from '@/modules/providers/list/opencode/opencode-server.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/index.js';
 import type {
   CustomProviderModelInput,
@@ -347,6 +348,52 @@ const parseSessionRenameSummary = (payload: unknown): string => {
   return summary;
 };
 
+/** More than this many ids in one batch is a client bug, not a bulk cleanup. */
+const MAX_BATCH_DELETE_SESSIONS = 200;
+
+/**
+ * Parses the batch deletion body: a non-empty id list plus the force flag.
+ * Ids use the same pattern as the single-session route, are deduplicated, and
+ * are capped so one request cannot fan out without bound.
+ */
+const parseSessionBatchDeletePayload = (payload: unknown): { sessionIds: string[]; force: boolean } => {
+  if (!payload || typeof payload !== 'object') {
+    throw new AppError('Request body must be an object.', {
+      code: 'INVALID_REQUEST_BODY',
+      statusCode: 400,
+    });
+  }
+
+  const body = payload as Record<string, unknown>;
+  if (!Array.isArray(body.sessionIds) || body.sessionIds.length === 0) {
+    throw new AppError('sessionIds must be a non-empty array.', {
+      code: 'INVALID_SESSION_IDS',
+      statusCode: 400,
+    });
+  }
+
+  const sessionIds = [...new Set(body.sessionIds.map((value) => {
+    const sessionId = typeof value === 'string' ? value.trim() : '';
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      throw new AppError('Invalid sessionId.', {
+        code: 'INVALID_SESSION_ID',
+        statusCode: 400,
+      });
+    }
+
+    return sessionId;
+  }))];
+
+  if (sessionIds.length > MAX_BATCH_DELETE_SESSIONS) {
+    throw new AppError(`At most ${MAX_BATCH_DELETE_SESSIONS} sessions can be deleted at once.`, {
+      code: 'SESSION_BATCH_TOO_LARGE',
+      statusCode: 400,
+    });
+  }
+
+  return { sessionIds, force: body.force === true };
+};
+
 const parseSessionSearchQuery = (value: unknown): string => {
   const query = readOptionalQueryString(value) ?? '';
   if (query.length < 2) {
@@ -518,7 +565,13 @@ router.get(
   '/:provider/models',
   asyncHandler(async (req: Request, res: Response) => {
     const provider = parseProvider(req.params.provider);
-    const models = await providerModelsService.getProviderModels(provider);
+    const serverId = typeof req.query.serverId === 'string' ? req.query.serverId : undefined;
+    if (serverId && (provider !== 'opencode' || !findOpenCodeServerConfig(serverId))) {
+      throw new AppError('Selected OpenCode instance is unavailable.', {
+        code: 'OPENCODE_SERVER_UNAVAILABLE', statusCode: 400,
+      });
+    }
+    const models = await providerModelsService.getProviderModels(provider, serverId);
     res.json(createApiSuccessResponse({ provider, models }));
   }),
 );
@@ -719,6 +772,11 @@ router.get(
 );
 
 // ----------------- Session routes -----------------
+/** Lists reachable OpenCode instances without exposing their authentication headers. */
+router.get('/opencode/servers', asyncHandler(async (_req: Request, res: Response) => {
+  res.json(createApiSuccessResponse(await listOpenCodeServers()));
+}));
+
 /**
  * Session gateway entry point: allocates the stable app-facing session id for
  * a brand-new chat. The frontend must call this before the first `chat.send`
@@ -732,7 +790,8 @@ router.post(
     const provider = parseProvider(body.provider);
     const projectPath = typeof body.projectPath === 'string' ? body.projectPath : '';
     const initialMessage = typeof body.initialMessage === 'string' ? body.initialMessage : '';
-    const result = sessionsService.createAppSession(provider, projectPath, initialMessage);
+    const openCodeServerId = typeof body.openCodeServerId === 'string' ? body.openCodeServerId : undefined;
+    const result = sessionsService.createAppSession(provider, projectPath, initialMessage, openCodeServerId);
     await broadcastSessionUpserted(result.sessionId).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[Providers] Failed to broadcast newly created session', {
@@ -802,6 +861,21 @@ router.get(
   }),
 );
 
+// Batch deletion is a POST rather than a DELETE because the selected ids
+// travel in the body; archive and force semantics match the single-session
+// DELETE below.
+router.post(
+  '/sessions/batch-delete',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { sessionIds, force } = parseSessionBatchDeletePayload(req.body);
+    const result = await sessionsService.deleteOrArchiveSessionsByIds(sessionIds, {
+      force,
+      deletedFromDisk: force,
+    });
+    res.json(createApiSuccessResponse(result));
+  }),
+);
+
 router.delete(
   '/sessions/:sessionId',
   asyncHandler(async (req: Request, res: Response) => {
@@ -839,7 +913,7 @@ router.put(
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
     const summary = parseSessionRenameSummary(req.body);
-    const result = sessionsService.renameSessionById(sessionId, summary);
+    const result = await sessionsService.renameSessionById(sessionId, summary);
     res.json(createApiSuccessResponse(result));
   }),
 );

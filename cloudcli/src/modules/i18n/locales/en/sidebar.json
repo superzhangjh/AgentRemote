@@ -22,7 +22,8 @@
     "projectOptions": "Project options",
     "lastActiveLabel": "{{age}} ago",
     "pin": "Pin to top",
-    "unpin": "Unpin"
+    "unpin": "Unpin",
+    "batchDeleteSessions": "Batch delete sessions"
   },
   "app": {
     "title": "Agent 遥控台",
@@ -122,7 +123,8 @@
     "restoreProjectError": "Error restoring project. Please try again.",
     "restoreSessionFailed": "Failed to restore session. Please try again.",
     "restoreSessionError": "Error restoring session. Please try again.",
-    "forkSessionError": "Could not fork this session. Please try again."
+    "forkSessionError": "Could not fork this session. Please try again.",
+    "batchDeleteSessionPartial": "{{count}} sessions could not be deleted."
   },
   "version": {
     "updateAvailable": "Update available",
@@ -165,5 +167,18 @@
     "deleteAllData": "Delete all data permanently",
     "allConversationsDeleted": "The project will be removed from the sidebar. Your files, memories, and session data will be preserved.",
     "cannotUndo": "You can re-add the project later."
+  },
+  "batchDelete": {
+    "title": "Batch delete sessions",
+    "selectAll": "Select all",
+    "clearSelection": "Clear selection",
+    "selectedCount": "{{count}} selected",
+    "empty": "This project has no sessions.",
+    "loadFailed": "Could not load sessions.",
+    "retry": "Retry",
+    "running": "Running",
+    "archiveSelected": "Archive selected",
+    "deleteSelected": "Delete selected permanently",
+    "archiveNotice": "Archiving keeps the transcript; permanent deletion removes it from disk."
   }
 }

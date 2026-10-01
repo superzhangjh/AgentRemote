@@ -8,6 +8,7 @@ type SessionRow = {
   session_id: string;
   provider: string;
   provider_session_id: string | null;
+  open_code_server_id?: string | null;
   project_path: string | null;
   jsonl_path: string | null;
   custom_name: string | null;
@@ -28,7 +29,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, open_code_server_id, project_path, jsonl_path, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -185,6 +186,7 @@ export const sessionsDb = {
     provider: string,
     projectPath: string,
     customName?: string,
+    openCodeServerId?: string,
   ): string {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPathForProvider(provider, projectPath);
@@ -192,11 +194,19 @@ export const sessionsDb = {
     projectsDb.createProjectPath(normalizedProjectPath);
 
     db.prepare(
-      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, isArchived, created_at, updated_at)
-       VALUES (?, ?, NULL, ?, ?, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    ).run(sessionId, provider, customName ?? null, normalizedProjectPath);
+      `INSERT INTO sessions (session_id, provider, provider_session_id, open_code_server_id, custom_name, project_path, jsonl_path, isArchived, created_at, updated_at)
+       VALUES (?, ?, NULL, ?, ?, ?, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    ).run(sessionId, provider, openCodeServerId ?? null, customName ?? null, normalizedProjectPath);
 
     return sessionId;
+  },
+
+  /** The OpenCode synchronizer records which discovered instance owns an imported session. */
+  pinOpenCodeServer(sessionId: string, serverId: string): void {
+    getConnection().prepare(
+      `UPDATE sessions SET open_code_server_id = COALESCE(open_code_server_id, ?)
+       WHERE session_id = ? AND provider = 'opencode'`
+    ).run(serverId, sessionId);
   },
 
   /**

@@ -78,6 +78,7 @@ type ProviderCapabilitiesApiResponse = {
 type UseChatProviderStateArgs = {
   selectedSession: ProjectSession | null;
   selectedProject: Project | null;
+  openCodeServerId?: string;
 };
 
 type ProviderModelsApiResponse = {
@@ -125,7 +126,7 @@ const getSessionSelectionKey = (provider: LLMProvider, sessionId: string): strin
   `${provider}:${sessionId}`
 );
 
-export function useChatProviderState({ selectedSession, selectedProject: _selectedProject }: UseChatProviderStateArgs) {
+export function useChatProviderState({ selectedSession, selectedProject: _selectedProject, openCodeServerId }: UseChatProviderStateArgs) {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
   const [pendingPermissionRequests, setPendingPermissionRequests] = useState<PendingPermissionRequest[]>([]);
   // The provider the composer sends under. Held here rather than read from
@@ -176,6 +177,8 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     Partial<Record<LLMProvider, ProviderModelsDefinition>>
   >({});
   const [providerModelsLoading, setProviderModelsLoading] = useState(true);
+  // A catalog is usable for a selected OpenCode instance only after that instance's request completes.
+  const [loadedOpenCodeServerId, setLoadedOpenCodeServerId] = useState<string | undefined>();
 
   const providerModelsRequestIdRef = useRef(0);
   const sessionSelectionLoadRequestIdRef = useRef(0);
@@ -208,7 +211,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     try {
       const results = await Promise.all(
         PROVIDERS.map(async (p) => {
-          const response = await api.providers.models(p);
+          const response = await api.providers.models(p, p === 'opencode' ? openCodeServerId : undefined);
           const body = (await response.json()) as ProviderModelsApiResponse;
           if (!body.success || !body.data?.models) {
             return null;
@@ -234,6 +237,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       });
 
       setProviderModelCatalog(nextCatalog);
+      setLoadedOpenCodeServerId(openCodeServerId);
     } catch (error) {
       console.error('Error loading provider models:', error);
     } finally {
@@ -241,7 +245,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         setProviderModelsLoading(false);
       }
     }
-  }, []);
+  }, [openCodeServerId]);
 
   useEffect(() => {
     void loadProviderModels();
@@ -837,6 +841,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     cyclePermissionMode,
     providerModelCatalog,
     providerModelsLoading,
+    loadedOpenCodeServerId,
     providerModelActions,
     selectProviderModel,
     selectProviderEffort,

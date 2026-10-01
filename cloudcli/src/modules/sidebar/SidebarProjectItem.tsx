@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { Check, Edit3, Folder, Loader2, MoreHorizontal, Pin, SquarePen, Trash2, X } from 'lucide-react';
+import { Check, Edit3, Folder, ListChecks, Loader2, MoreHorizontal, Pin, SquarePen, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Dialog, DialogContent, DialogTitle } from '@/shared/ui';
@@ -37,6 +37,8 @@ type SidebarProjectItemProps = {
   onCancelEditingProject: () => void;
   onSaveProjectName: (projectId: string, nextName: string) => void;
   onDeleteProject: (project: Project) => void;
+  /** Opens the project's multi-select dialog for deleting several sessions at once. */
+  onBatchDeleteSessions: (project: Project) => void;
   onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   onForkSession?: (session: SessionWithProvider) => void;
@@ -89,6 +91,7 @@ function SidebarProjectItem({
   onCancelEditingProject,
   onSaveProjectName,
   onDeleteProject,
+  onBatchDeleteSessions,
   onSessionSelect,
   onDeleteSession,
   onForkSession,
@@ -383,6 +386,20 @@ function SidebarProjectItem({
             >
               <Edit3 className="h-5 w-5 flex-shrink-0" />
               <span className="text-sm font-medium">{t('projects.renameProject')}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsMobileOptionsOpen(false);
+                onBatchDeleteSessions(project);
+              }}
+              className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
+            >
+              <ListChecks className="h-5 w-5 flex-shrink-0" />
+              <span className="text-sm font-medium">
+                {t('projects.batchDeleteSessions', { defaultValue: 'Batch delete sessions' })}
+              </span>
             </button>
 
             <button

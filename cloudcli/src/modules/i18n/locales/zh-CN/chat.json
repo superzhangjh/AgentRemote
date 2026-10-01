@@ -105,6 +105,17 @@
     "loading": "加载中…"
   },
   "input": {
+    "openCodeInstance": "OpenCode 客户端",
+    "openCodeInstanceHelp": "选择新会话使用的 OpenCode 客户端",
+    "openCodeInstanceNote": "桌面客户端使用各自的登录账号；AgentRemote CLI 是独立服务。",
+    "noOpenCodeInstances": "没有可用的 OpenCode 客户端",
+    "openCodeInstancesFailed": "无法读取 OpenCode 客户端列表",
+    "chooseOpenCodeInstance": "请先选择一个可用的 OpenCode 客户端。",
+    "waitForOpenCodeModels": "正在加载此 OpenCode 客户端的模型，请稍后再发送。",
+    "nameOpenCodeInstance": "给这个 OpenCode 客户端起名",
+    "renameOpenCodeInstance": "命名",
+    "saveOpenCodeInstanceName": "保存",
+    "closeOpenCodeInstancePicker": "完成",
     "placeholder": "输入 / 调用命令，@ 选择文件，或向 {{provider}} 提问...",
     "placeholderDefault": "输入您的消息...",
     "disabled": "输入已禁用",
@@ -276,5 +287,10 @@
     "failed": "未发送 — {{reason}}",
     "cancel": "取消定时消息",
     "dismiss": "关闭失败提示"
+  },
+  "misc": {
+    "typeAnswer": "输入你的答案…",
+    "skipOne": "忽略",
+    "skipAll": "全部忽略"
   }
 }

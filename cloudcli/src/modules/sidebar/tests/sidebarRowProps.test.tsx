@@ -89,6 +89,7 @@ const listProps = (activeRename: ActiveSidebarRename | null): SidebarProjectList
   onCancelEditingProject: noop,
   onSaveProjectName: noop,
   onDeleteProject: noop,
+  onBatchDeleteSessions: noop,
   onSessionSelect: noop,
   onDeleteSession: noop,
   onNewSession: noop,

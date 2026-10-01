@@ -1,64 +1,47 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import fs from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { closeConnection, initializeDatabase } from '@/modules/database/index.js';
 
+import { closeConnection, initializeDatabase } from '@/modules/database/index.js';
+import { resolveOpenCodeServerConfigs } from '@/shared/utils.js';
 import {
   OpenCodeProviderModels,
   OPENCODE_PREDEFINED_MODELS,
 } from '@/modules/providers/list/opencode/opencode-models.provider.js';
-
-const OPENCODE_ENV_KEYS = ['OPENCODE_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY'];
+import { listOpenCodeServers } from '@/modules/providers/list/opencode/opencode-server.js';
 
 /**
- * Runs one case against a throwaway OpenCode home, so the catalog the adapter
- * reports depends on the fixture rather than on the providers the machine
- * running the suite happens to be logged into.
+ * Runs one case with the SDK pointed at a closed port, so the catalog the
+ * adapter reports depends on the fixture rather than on an OpenCode server the
+ * developer running the suite happens to have listening on the default port.
  */
 const withOpenCodeHome = async (
-  setUp: (homeDir: string) => Promise<void>,
   runTest: (adapter: OpenCodeProviderModels) => Promise<void>,
 ): Promise<void> => {
   const homeDir = await mkdtemp(path.join(os.tmpdir(), 'opencode-catalog-'));
   const originalHomedir = os.homedir;
-  const originalPath = process.env.PATH;
-  const originalEnv = OPENCODE_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+  const originalServerUrl = process.env.OPENCODE_SERVER_URL;
 
   (os as any).homedir = () => homeDir;
-  process.env.PATH = homeDir;
-  for (const key of OPENCODE_ENV_KEYS) {
-    delete process.env[key];
-  }
+  process.env.OPENCODE_SERVER_URL = 'http://127.0.0.1:1';
 
   try {
-    await setUp(homeDir);
     await runTest(new OpenCodeProviderModels());
   } finally {
     (os as any).homedir = originalHomedir;
-    process.env.PATH = originalPath;
-    for (const [key, value] of originalEnv) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
+    if (originalServerUrl === undefined) delete process.env.OPENCODE_SERVER_URL;
+    else process.env.OPENCODE_SERVER_URL = originalServerUrl;
     await rm(homeDir, { recursive: true, force: true });
   }
 };
 
-const writeOpenCodeAuth = async (homeDir: string, auth: Record<string, unknown>): Promise<void> => {
-  const authDir = path.join(homeDir, '.local', 'share', 'opencode');
-  await mkdir(authDir, { recursive: true });
-  await writeFile(path.join(authDir, 'auth.json'), JSON.stringify(auth), 'utf8');
-};
-
-test('OpenCode uses the curated catalog when CLI discovery is unavailable', async () => {
-  await withOpenCodeHome(async () => {}, async (adapter) => {
-    // Nothing readable about this install, so the picker keeps every option
-    // rather than coming up empty.
+test('OpenCode uses the curated catalog when no server is reachable', async () => {
+  await withOpenCodeHome(async (adapter) => {
+    // Nothing readable from a server, so the picker keeps every option rather
+    // than coming up empty.
     assert.deepEqual(await adapter.getSupportedModels(), OPENCODE_PREDEFINED_MODELS);
     assert.equal(
       (await adapter.getCurrentActiveModel()).model,
@@ -66,7 +49,7 @@ test('OpenCode uses the curated catalog when CLI discovery is unavailable', asyn
     );
   });
   // OpenCode routes by `<providerID>/<modelID>`, so every option has to carry a
-  // provider prefix that `opencode models --verbose` reports.
+  // provider prefix the server reports.
   const providerIds = new Set(
     OPENCODE_PREDEFINED_MODELS.OPTIONS.map((option) => option.value.split('/')[0]),
   );
@@ -101,9 +84,8 @@ test('OpenCode uses the curated catalog when CLI discovery is unavailable', asyn
     (option) => option.value === 'opencode-go/glm-5.3-flash',
   );
   assert.ok(glmFlash);
-  // Effort choices come from `opencode models --verbose` variants; the runtime
-  // turns a selected value into `--variant`, so the values have to match the
-  // CLI's exactly.
+  // Effort choices come from the server's model variants; the runtime turns a
+  // selected value into `--variant`, so the values have to match exactly.
   assert.deepEqual(
     glmFlash?.effort?.values.map((value) => value.value),
     ['low', 'high', 'max'],
@@ -120,17 +102,10 @@ test('OpenCode uses the curated catalog when CLI discovery is unavailable', asyn
 });
 
 test('OpenCode reads models and reasoning variants from a running server', async () => {
-  await withOpenCodeHome(async (homeDir) => {
-    const descriptorDir = path.join(homeDir, '.agent-remote');
-    await mkdir(descriptorDir, { recursive: true });
-    await writeFile(
-      path.join(descriptorDir, 'opencode-server.json'),
-      JSON.stringify({ url: 'http://127.0.0.1:4096' }),
-      'utf8',
-    );
-  }, async (adapter) => {
+  await withOpenCodeHome(async (adapter) => {
     const originalFetch = globalThis.fetch;
     let requestedUrl = '';
+    process.env.OPENCODE_SERVER_URL = 'http://127.0.0.1:4096';
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
       requestedUrl = input instanceof Request ? input.url : String(input);
       return new Response(JSON.stringify({
@@ -175,10 +150,59 @@ test('OpenCode reads models and reasoning variants from a running server', async
   });
 });
 
+test('OpenCode model catalog follows the selected desktop instance', async () => {
+  await withOpenCodeHome(async (adapter) => {
+    const previousFetch = globalThis.fetch;
+    const previousDescriptor = process.env.AGENT_REMOTE_OPENCODE_STATE_FILE;
+    const profileRoot = path.join(os.homedir(), '.opencode-profiles');
+    for (const [name, port] of [['account-a', 4101], ['account-b', 4102]] as const) {
+      const descriptor = path.join(profileRoot, name, 'state', 'opencode', 'service.json');
+      fs.mkdirSync(path.dirname(descriptor), { recursive: true });
+      fs.writeFileSync(descriptor, JSON.stringify({ url: `http://127.0.0.1:${port}`, password: '' }));
+    }
+    delete process.env.OPENCODE_SERVER_URL;
+    const managedDescriptor = path.join(os.homedir(), 'agentremote.json');
+    fs.writeFileSync(managedDescriptor, JSON.stringify({ url: 'http://127.0.0.1:4100' }));
+    process.env.AGENT_REMOTE_OPENCODE_STATE_FILE = managedDescriptor;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith('/api/session/active')) {
+        return new Response(JSON.stringify({ data: {} }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      const model = url.includes(':4102') ? 'account-b-model' : 'account-a-model';
+      return new Response(JSON.stringify({ providers: [{ id: 'test', models: { [model]: { name: model } } }] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const selected = resolveOpenCodeServerConfigs().find((config) => config.url.endsWith(':4102'));
+      assert.ok(selected?.id);
+      const models = await adapter.getSupportedModels(selected.id);
+      assert.deepEqual(models.OPTIONS.map((option) => option.value), ['test/account-b-model']);
+      const processTable = [
+        '/Applications/OpenCode.app/Contents/MacOS/OpenCode',
+        `/Applications/OpenCode 2.app/Contents/MacOS/OpenCode XDG_STATE_HOME=${path.join(profileRoot, 'account-a', 'state')}`,
+        `/Applications/OpenCode 3.app/Contents/MacOS/OpenCode XDG_STATE_HOME=${path.join(profileRoot, 'account-b', 'state')}`,
+      ].join('\n');
+      const choices = await listOpenCodeServers(processTable);
+      assert.ok(choices[0]?.id.startsWith('service:'));
+      assert.ok(choices[1]?.id.startsWith('service:'));
+      assert.equal(choices.find((choice) => choice.id === 'agentremote')?.url, 'http://127.0.0.1:4100');
+      const afterClosingSecondApp = await listOpenCodeServers(processTable.split('\n').slice(0, 2).join('\n'));
+      assert.equal(afterClosingSecondApp.filter((choice) => choice.id.startsWith('service:')).length, 1);
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousDescriptor === undefined) delete process.env.AGENT_REMOTE_OPENCODE_STATE_FILE;
+      else process.env.AGENT_REMOTE_OPENCODE_STATE_FILE = previousDescriptor;
+    }
+  });
+});
+
 test('OpenCode session model keeps its provider prefix', async () => {
-  await withOpenCodeHome(async () => {}, async (adapter) => {
+  await withOpenCodeHome(async (adapter) => {
     const previousDatabasePath = process.env.DATABASE_PATH;
-    const previousServerUrl = process.env.OPENCODE_SERVER_URL;
     const originalFetch = globalThis.fetch;
     closeConnection();
     process.env.DATABASE_PATH = path.join(os.homedir(), 'cloudcli.db');
@@ -207,103 +231,6 @@ test('OpenCode session model keeps its provider prefix', async () => {
       closeConnection();
       if (previousDatabasePath === undefined) delete process.env.DATABASE_PATH;
       else process.env.DATABASE_PATH = previousDatabasePath;
-      if (previousServerUrl === undefined) delete process.env.OPENCODE_SERVER_URL;
-      else process.env.OPENCODE_SERVER_URL = previousServerUrl;
     }
   });
-});
-
-test('OpenCode exposes models reported by the installed CLI', async () => {
-  await withOpenCodeHome(async (homeDir) => {
-    const executable = path.join(homeDir, 'opencode');
-    await writeFile(executable, '#!/bin/sh\nprintf "opencode-go/deepseek-v4.1-flash\\n"\n');
-    await chmod(executable, 0o755);
-  }, async (adapter) => {
-    const models = await adapter.getSupportedModels();
-    assert.deepEqual(models.OPTIONS.map((option) => option.value), ['opencode-go/deepseek-v4.1-flash']);
-    assert.equal(models.DEFAULT, 'opencode-go/deepseek-v4.1-flash');
-  });
-});
-
-test('OpenCode offers only models the install can route to', async () => {
-  // Asking for a provider the user never connected fails the whole run with
-  // "Model <id> is not valid", so an OpenCode Zen model must not be offered -
-  // or defaulted to - on a machine that only holds an Anthropic key.
-  await withOpenCodeHome(
-    (homeDir) => writeOpenCodeAuth(homeDir, { anthropic: { type: 'api', key: 'test' } }),
-    async (adapter) => {
-      const catalog = await adapter.getSupportedModels();
-      const providerIds = new Set(catalog.OPTIONS.map((option) => option.value.split('/')[0]));
-
-      assert.deepEqual([...providerIds], ['anthropic']);
-      assert.ok(catalog.OPTIONS.length > 0);
-      assert.equal(catalog.DEFAULT.startsWith('anthropic/'), true);
-      assert.ok(catalog.OPTIONS.some((option) => option.value === catalog.DEFAULT));
-      assert.equal((await adapter.getCurrentActiveModel()).model, catalog.DEFAULT);
-    },
-  );
-
-  // A Go subscriber's auth store holds only `opencode-go`, so the whole catalog
-  // has to resolve to Go models and the default has to move onto one of them
-  // instead of the unreachable Zen default.
-  await withOpenCodeHome(
-    (homeDir) => writeOpenCodeAuth(homeDir, { 'opencode-go': { type: 'api', key: 'test' } }),
-    async (adapter) => {
-      const catalog = await adapter.getSupportedModels();
-      const providerIds = new Set(catalog.OPTIONS.map((option) => option.value.split('/')[0]));
-
-      assert.deepEqual([...providerIds], ['opencode-go']);
-      assert.equal(catalog.OPTIONS.length, 27);
-      assert.equal(catalog.DEFAULT, 'opencode-go/grok-4.6');
-      assert.ok(catalog.OPTIONS.some((option) => option.value === catalog.DEFAULT));
-      assert.equal((await adapter.getCurrentActiveModel()).model, catalog.DEFAULT);
-    },
-  );
-
-  // The catalog default survives whenever its own provider is connected.
-  await withOpenCodeHome(
-    (homeDir) => writeOpenCodeAuth(homeDir, {
-      opencode: { type: 'api', key: 'test' },
-      openai: { type: 'oauth' },
-    }),
-    async (adapter) => {
-      const catalog = await adapter.getSupportedModels();
-      const providerIds = new Set(catalog.OPTIONS.map((option) => option.value.split('/')[0]));
-
-      assert.deepEqual([...providerIds].sort(), ['opencode', 'openai'].sort());
-      assert.equal(catalog.DEFAULT, OPENCODE_PREDEFINED_MODELS.DEFAULT);
-    },
-  );
-
-  // Providers configured rather than logged into count too.
-  await withOpenCodeHome(
-    async (homeDir) => {
-      const configDir = path.join(homeDir, '.config', 'opencode');
-      await mkdir(configDir, { recursive: true });
-      await writeFile(
-        path.join(configDir, 'opencode.json'),
-        JSON.stringify({ provider: { anthropic: { options: {} } } }),
-        'utf8',
-      );
-    },
-    async (adapter) => {
-      const catalog = await adapter.getSupportedModels();
-      const providerIds = new Set(catalog.OPTIONS.map((option) => option.value.split('/')[0]));
-
-      assert.deepEqual([...providerIds], ['anthropic']);
-    },
-  );
-
-  // An API key in the environment is enough on its own.
-  await withOpenCodeHome(
-    async () => {
-      process.env.OPENAI_API_KEY = 'test';
-    },
-    async (adapter) => {
-      const catalog = await adapter.getSupportedModels();
-      const providerIds = new Set(catalog.OPTIONS.map((option) => option.value.split('/')[0]));
-
-      assert.deepEqual([...providerIds], ['openai']);
-    },
-  );
 });

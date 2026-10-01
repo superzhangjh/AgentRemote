@@ -34,6 +34,7 @@ import PermissionRequestsBanner from '@/modules/chat/composer/PermissionRequests
 import QueuedMessageCard from '@/modules/chat/composer/QueuedMessageCard';
 import ComposerModelMenu from '@/modules/chat/composer/ComposerModelMenu';
 import ComposerPermissionMenu from '@/modules/chat/composer/ComposerPermissionMenu';
+import OpenCodeInstancePicker from '@/modules/chat/composer/OpenCodeInstancePicker';
 
 type MentionableFile = {
   name: string;
@@ -57,6 +58,7 @@ type ChatComposerProps = {
   openCodeServers?: Array<{ id: string; label: string; url: string }>;
   selectedOpenCodeServerId?: string;
   onSelectOpenCodeServer?: (id: string) => void;
+  onRenameOpenCodeServer?: (id: string, label: string) => void;
   openCodeServersError?: string | null;
   effort: string;
   availableEffortOptions: NonNullable<ProviderModelOption['effort']>['values'];
@@ -132,6 +134,7 @@ export default function ChatComposer({
   openCodeServers,
   selectedOpenCodeServerId,
   onSelectOpenCodeServer,
+  onRenameOpenCodeServer,
   openCodeServersError,
   effort,
   availableEffortOptions,
@@ -277,7 +280,9 @@ export default function ChatComposer({
       )}
 
       {pendingPermissionRequests.length > 0 && (
-        <div className="mx-auto mb-3 max-w-[54.25rem]">
+        // The panel scrolls inside a capped shell so a tall question (or a long
+        // approval input) can never push the transcript off a phone screen.
+        <div className="mx-auto mb-3 max-h-[75vh] max-w-[54.25rem] overflow-y-auto overscroll-contain">
           <PermissionRequestsBanner
             pendingPermissionRequests={pendingPermissionRequests}
             handlePermissionDecision={handlePermissionDecision}
@@ -356,6 +361,17 @@ export default function ChatComposer({
           isOpen={isCommandMenuOpen}
           frequentCommands={frequentCommands}
         />
+
+        {openCodeServers && openCodeServers.length > 1 && onSelectOpenCodeServer && onRenameOpenCodeServer && (
+          <OpenCodeInstancePicker
+            servers={openCodeServers}
+            selectedId={selectedOpenCodeServerId ?? ''}
+            error={openCodeServersError}
+            disabled={isLoading}
+            onSelect={onSelectOpenCodeServer}
+            onRename={onRenameOpenCodeServer}
+          />
+        )}
 
         <PromptInput
           onSubmit={onSubmit as (event: FormEvent<HTMLFormElement>) => void}
@@ -466,24 +482,6 @@ export default function ChatComposer({
           </PromptInputTools>
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
-            {openCodeServers && (
-              <label className="flex items-center gap-1 text-xs text-muted-foreground">
-                <span className="sr-only">OpenCode 实例</span>
-                <select
-                  aria-label="OpenCode 实例"
-                  value={selectedOpenCodeServerId ?? ''}
-                  onChange={(event) => onSelectOpenCodeServer?.(event.target.value)}
-                  disabled={isLoading || openCodeServers.length === 0}
-                  className="max-w-36 rounded border border-input bg-background px-1 py-1 text-foreground sm:max-w-52"
-                  title={openCodeServersError ?? '选择新会话使用的 OpenCode 客户端'}
-                >
-                  {openCodeServers.length === 0 && <option value="">{openCodeServersError ?? '未找到 OpenCode 服务'}</option>}
-                  {openCodeServers.map((server) => (
-                    <option key={server.id} value={server.id}>{server.label} · {server.url}</option>
-                  ))}
-                </select>
-              </label>
-            )}
             <ComposerModelMenu
               effort={effort}
               effortOptions={availableEffortOptions}

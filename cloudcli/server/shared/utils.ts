@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import {
   access,
@@ -24,6 +25,7 @@ import type {
   ApiSuccessShape,
   AppErrorOptions,
   NormalizedMessage,
+  OpenCodeServerConfig,
   ProviderCurrentActiveModel,
   ProviderModelsDefinition,
   ProviderSkillSource,
@@ -894,19 +896,7 @@ export function readJsonRecord(value: unknown): AnyRecord | null {
 }
 
 // ---------------------------
-//----------------- OPENCODE SESSION STORAGE UTILITIES ------------
-/**
- * Resolves the OpenCode SQLite session database path.
- *
- * OpenCode stores session, message, part, and project metadata in one shared
- * `opencode.db` file under its XDG data directory. Provider readers and
- * synchronizers should use this path for read-only access and should never store
- * it as a deletable transcript path for an individual app session row.
- */
-export function getOpenCodeDatabasePath(): string {
-  return path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db');
-}
-
+//----------------- OPENCODE SERVER UTILITIES ------------
 /**
  * Resolves the descriptor file the AgentRemote macOS console writes when it
  * starts a long-lived `opencode serve` instance.
@@ -943,6 +933,205 @@ export function readSharedOpenCodeServerUrl(): string | null {
   } catch {
     return null;
   }
+}
+
+/** The loopback port `opencode serve` binds when nothing else is configured. */
+const DEFAULT_OPENCODE_SERVER_URL = 'http://127.0.0.1:4096';
+
+/**
+ * Builds the HTTP Basic auth header OpenCode uses when
+ * `OPENCODE_SERVER_PASSWORD` is set. The username defaults to `opencode`,
+ * matching the CLI, and is only consulted alongside a password.
+ */
+function buildOpenCodeAuthHeaders(
+  username: string | undefined,
+  password: string | undefined,
+): Record<string, string> {
+  if (!password) {
+    return {};
+  }
+
+  const token = Buffer.from(`${username?.trim() || 'opencode'}:${password}`, 'utf8').toString('base64');
+  return { Authorization: `Basic ${token}` };
+}
+
+/**
+ * Reads a running `opencode serve` process's `--port` and
+ * `OPENCODE_SERVER_PASSWORD` from the process table.
+ *
+ * The CLI generates a random per-process password and only exposes it in its
+ * own environment; there is no config file to read. Reading the process table
+ * lets CloudCLI connect without the user copying the address or secret, which
+ * is exactly how `opencode attach` behaves when given no arguments.
+ */
+function discoverRunningOpenCodeServer(): { port: string | null; password: string | null } {
+  try {
+    const output = execFileSync('ps', ['eww', '-ax'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    for (const line of output.split('\n')) {
+      // Only an actual `opencode serve` invocation, not an unrelated process
+      // that merely inherited the variable and mentions both words.
+      if (!/opencode(\.js)?\s+serve/.test(line)) {
+        continue;
+      }
+
+      const password = line.match(/OPENCODE_SERVER_PASSWORD=(\S+)/)?.[1] ?? null;
+      if (!password) {
+        continue;
+      }
+
+      // The CLI accepts both `--port=1234` and `--port 1234`.
+      const port = line.match(/--port[= ](\d+)/)?.[1] ?? null;
+      if (!port) {
+        continue;
+      }
+      return { port, password };
+    }
+  } catch {
+    // Process discovery is best-effort; fall back to defaults when it fails.
+  }
+
+  return { port: null, password: null };
+}
+
+/** Reads a v2 background service's `service.json` descriptor (`url` + `password`). */
+function readOpenCodeServiceDescriptor(filePath: string): OpenCodeServerConfig | null {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+    const url = typeof parsed.url === 'string' && parsed.url.trim() ? parsed.url.trim() : null;
+    if (!url) {
+      return null;
+    }
+
+    const password = typeof parsed.password === 'string' ? parsed.password : '';
+    const profile = filePath.match(/\.opencode-profiles\/([^/]+)\//)?.[1];
+    return {
+      url,
+      headers: buildOpenCodeAuthHeaders('opencode', password),
+      id: `service:${createHash('sha256').update(filePath).digest('hex').slice(0, 16)}`,
+      label: profile ? `OpenCode · ${profile}` : 'OpenCode · Default',
+      desktopStateHome: path.dirname(path.dirname(filePath)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Discovers the OpenCode v2 background services the desktop apps run.
+ *
+ * Each service writes `service.json` (url + password) under its own
+ * `XDG_STATE_HOME/opencode`. Running `opencode-cli serve --service` processes
+ * advertise that state home in their environment, and the default and
+ * profile-scoped locations are checked directly as a fallback.
+ */
+function discoverOpenCodeServiceServers(): OpenCodeServerConfig[] {
+  const descriptors: string[] = [];
+  const seenHomes = new Set<string>();
+  const addDescriptor = (stateHome: string) => {
+    if (!stateHome || seenHomes.has(stateHome)) {
+      return;
+    }
+    seenHomes.add(stateHome);
+    descriptors.push(path.join(stateHome, 'opencode', 'service.json'));
+  };
+
+  try {
+    const output = execFileSync('ps', ['eww', '-ax'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    for (const line of output.split('\n')) {
+      if (!line.includes('opencode-cli') || !line.includes('serve')) {
+        continue;
+      }
+      const stateHome = line.match(/XDG_STATE_HOME=(\S+)/)?.[1];
+      if (stateHome) {
+        addDescriptor(stateHome);
+        continue;
+      }
+      const home = line.match(/(?:^|\s)HOME=(\S+)/)?.[1];
+      if (home) {
+        addDescriptor(path.join(home, '.local', 'state'));
+      }
+    }
+  } catch {
+    // Process discovery is best-effort; the fixed locations below still apply.
+  }
+
+  const home = os.homedir();
+  addDescriptor(path.join(home, '.local', 'state'));
+  addDescriptor(path.join(home, '.config'));
+  try {
+    for (const entry of fs.readdirSync(path.join(home, '.opencode-profiles'))) {
+      addDescriptor(path.join(home, '.opencode-profiles', entry, 'state'));
+      addDescriptor(path.join(home, '.opencode-profiles', entry, 'config'));
+    }
+  } catch {
+    // No profile directory; nothing more to add.
+  }
+
+  const configs: OpenCodeServerConfig[] = [];
+  for (const descriptor of descriptors) {
+    const config = readOpenCodeServiceDescriptor(descriptor);
+    if (config) {
+      configs.push(config);
+    }
+  }
+  return configs;
+}
+
+/**
+ * Resolves every OpenCode server CloudCLI should mirror.
+ *
+ * Explicit environment variables pin a single server. Otherwise the console's
+ * advertised `opencode serve`, the desktop apps' v2 background services, and any
+ * `opencode serve` discoverable through the process table are all included, so a
+ * turn started on any of them reaches the phone. The v2 API is used against all
+ * of them, because both 1.18 and 2.0 expose it. Consumed by the OpenCode bridge
+ * and by the provider session/model/token readers.
+ */
+export function resolveOpenCodeServerConfigs(): OpenCodeServerConfig[] {
+  const configuredUrl = process.env.OPENCODE_SERVER_URL?.trim();
+  const configuredPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  if (configuredUrl || configuredPassword) {
+    return [{
+      url: configuredUrl || DEFAULT_OPENCODE_SERVER_URL,
+      headers: buildOpenCodeAuthHeaders(process.env.OPENCODE_SERVER_USERNAME, configuredPassword),
+      id: 'configured',
+      label: 'OpenCode · Configured',
+    }];
+  }
+
+  const configs: OpenCodeServerConfig[] = [];
+  const sharedUrl = readSharedOpenCodeServerUrl();
+  if (sharedUrl) {
+    configs.push({ url: sharedUrl, headers: {}, id: 'agentremote', label: 'OpenCode · AgentRemote CLI' });
+  }
+  configs.push(...discoverOpenCodeServiceServers());
+
+  const discovered = discoverRunningOpenCodeServer();
+  if (discovered.password) {
+    configs.push({
+      url: `http://127.0.0.1:${discovered.port ?? '4096'}`,
+      headers: buildOpenCodeAuthHeaders(process.env.OPENCODE_SERVER_USERNAME, discovered.password),
+      id: `serve:${discovered.port ?? '4096'}`,
+      label: `OpenCode · Port ${discovered.port ?? '4096'}`,
+    });
+  }
+
+  const unique = new Map<string, OpenCodeServerConfig>();
+  for (const config of configs) {
+    if (!unique.has(config.url)) {
+      unique.set(config.url, config);
+    }
+  }
+  if (unique.size === 0) {
+    unique.set(DEFAULT_OPENCODE_SERVER_URL, {
+      url: DEFAULT_OPENCODE_SERVER_URL, headers: {}, id: 'default', label: 'OpenCode · Default',
+    });
+  }
+  return [...unique.values()];
 }
 
 /**

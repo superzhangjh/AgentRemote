@@ -69,6 +69,26 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
 export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode';
 
 /**
+ * Address and auth headers for one OpenCode server.
+ *
+ * Several OpenCode servers can run at once (the console-managed `opencode
+ * serve`, each desktop app's background service, ...), so callers that mirror
+ * every server resolve a list of these. `headers` carries the HTTP Basic auth
+ * the CLI/server was started with, or is empty when it accepts anonymous
+ * loopback access.
+ */
+export type OpenCodeServerConfig = {
+  url: string;
+  headers: Record<string, string>;
+  /** Stable discovery key used to keep a chat on the selected OpenCode profile. */
+  id?: string;
+  /** Human-readable source shown in the new-chat selector. */
+  label?: string;
+  /** State directory of a desktop app, used to hide its detached service after the app exits. */
+  desktopStateHome?: string;
+};
+
+/**
  * One selectable model row in a provider model catalog.
  */
 export type ProviderModelOption = {
@@ -251,6 +271,15 @@ export type SessionUpsertedEvent = {
     lastActivity: string;
   };
   project: SessionUpsertedProject | null;
+  /**
+   * Why this delta was emitted, when it is not an ordinary content change.
+   *
+   * `'rename'` marks a title-only change. Clients use it to update the row
+   * without treating the session as having new activity — a rename is not
+   * unread output and must not raise the sidebar's attention indicator or
+   * reload the open transcript. Omitted for every content-driven delta.
+   */
+  reason?: 'rename';
   timestamp: string;
 };
 

@@ -6,6 +6,7 @@ import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcastSessionUpserted, chatRunRegistry, listExternalBusySessions } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
+import { findOpenCodeServerConfig } from '@/modules/providers/list/opencode/opencode-server.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
 import type {
   FetchHistoryOptions,
@@ -46,10 +47,24 @@ type RecentSessionsPage = {
   hasMore: boolean;
 };
 
+/** One session's outcome inside a batch deletion; `skipped` means the row was already gone. */
+type BatchSessionDeletionResult = {
+  sessionId: string;
+  action: 'archived' | 'deleted' | 'skipped';
+  deletedFromDisk: boolean;
+};
+
+/** Batch deletion outcome: the per-session results plus the ids that could not be deleted. */
+type BatchSessionDeletionOutcome = {
+  results: BatchSessionDeletionResult[];
+  failures: Array<{ sessionId: string; message: string }>;
+};
+
 type SessionDetails = {
   /** Canonical app-facing session id (may differ from the looked-up id when a provider-native id was given). */
   sessionId: string;
   provider: LLMProvider;
+  openCodeServerId: string | null;
   summary: string;
   createdAt: string | null;
   updatedAt: string | null;
@@ -100,16 +115,23 @@ async function readCodexTranscriptActivity(jsonlPath: string): Promise<boolean> 
 
 async function isExternalCodexSessionRunning(sessionId: string): Promise<boolean> {
   const session = sessionsDb.getSessionById(sessionId);
-  if (session?.provider !== 'codex' || !session.provider_session_id || !session.jsonl_path) {
+  if (session?.provider !== 'codex' || !session.provider_session_id) {
     return false;
   }
 
+  // A fresh app-server can report an externally owned thread as idle. Its
+  // transcript is the shared source of truth across Codex processes.
+  if (session.jsonl_path) {
+    try {
+      return await readCodexTranscriptActivity(session.jsonl_path);
+    } catch {
+      // A newly created thread may not have written its transcript yet.
+    }
+  }
   try {
     return await codexAppServer.getThreadActivity(session.provider_session_id);
   } catch {
-    // Another app-server can report notLoaded or reject its turn-list API.
-    // Its query failure says nothing about the process that owns this rollout.
-    return readCodexTranscriptActivity(session.jsonl_path).catch(() => false);
+    return false;
   }
 }
 
@@ -313,6 +335,7 @@ export const sessionsService = {
     provider: LLMProvider,
     projectPath: string,
     initialMessage: string,
+    openCodeServerId?: string,
   ): CreateAppSessionResult {
     const normalizedProjectPath = projectPath.trim();
     if (!normalizedProjectPath) {
@@ -324,7 +347,12 @@ export const sessionsService = {
 
     const sessionId = randomUUID();
     const sessionName = buildCloudCliSessionName(initialMessage);
-    sessionsDb.createAppSession(sessionId, provider, normalizedProjectPath, sessionName);
+    if (openCodeServerId && (provider !== 'opencode' || !findOpenCodeServerConfig(openCodeServerId))) {
+      throw new AppError('Selected OpenCode instance is unavailable.', {
+        code: 'OPENCODE_SERVER_UNAVAILABLE', statusCode: 400,
+      });
+    }
+    sessionsDb.createAppSession(sessionId, provider, normalizedProjectPath, sessionName, openCodeServerId);
 
     return {
       sessionId,
@@ -611,6 +639,7 @@ export const sessionsService = {
     return {
       sessionId: session.session_id,
       provider: session.provider as LLMProvider,
+      openCodeServerId: session.open_code_server_id ?? null,
       summary: session.custom_name?.trim() || '',
       createdAt: session.created_at ?? null,
       updatedAt: session.updated_at ?? null,
@@ -719,11 +748,61 @@ export const sessionsService = {
       });
     }
 
+    // An OpenCode conversation lives on its server, not in a transcript this
+    // delete removed, so the indexer would list it again on its next scan.
+    // Record a tombstone after the row is gone so a force delete sticks.
+    if (session.provider === 'opencode' && session.provider_session_id) {
+      sessionsDb.markProviderSessionSuperseded({
+        providerSessionId: session.provider_session_id,
+        provider: session.provider,
+        sessionId,
+        jsonlPath: null,
+      });
+    }
+
     return {
       sessionId,
       action: 'deleted',
       deletedFromDisk: removedFromDisk,
     };
+  },
+
+  /**
+   * Archives or permanently deletes several sessions in one call.
+   *
+   * Each id walks the single-session path so transcript removal and OpenCode
+   * tombstones behave identically. A row that is already gone is reported as
+   * `skipped` instead of failing the batch — another device may have archived
+   * or deleted it first — while any other error is collected per id so the
+   * caller can report a partial result without losing the successful work.
+   */
+  async deleteOrArchiveSessionsByIds(
+    sessionIds: string[],
+    options: {
+      force?: boolean;
+      deletedFromDisk?: boolean;
+    } = {},
+  ): Promise<BatchSessionDeletionOutcome> {
+    const results: BatchSessionDeletionResult[] = [];
+    const failures: BatchSessionDeletionOutcome['failures'] = [];
+
+    for (const sessionId of sessionIds) {
+      try {
+        results.push(await this.deleteOrArchiveSessionById(sessionId, options));
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'SESSION_NOT_FOUND') {
+          results.push({ sessionId, action: 'skipped', deletedFromDisk: false });
+          continue;
+        }
+
+        failures.push({
+          sessionId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return { results, failures };
   },
 
   /**
@@ -744,8 +823,17 @@ export const sessionsService = {
 
   /**
    * Renames one session by id without requiring the caller to pass provider.
+   *
+   * Broadcasts a `session_upserted` delta after persisting so every connected
+   * client picks up the new title, not just the one that issued the rename.
+   * Without it a rename performed here stayed invisible elsewhere (e.g. the
+   * phone's WebView showing the same sidebar), leaving the two sides with
+   * different names until something forced a refetch.
    */
-  renameSessionById(sessionId: string, summary: string): { sessionId: string; summary: string } {
+  async renameSessionById(
+    sessionId: string,
+    summary: string,
+  ): Promise<{ sessionId: string; summary: string }> {
     const session = sessionsDb.getSessionById(sessionId);
     if (!session) {
       throw new AppError(`Session "${sessionId}" was not found.`, {
@@ -755,6 +843,16 @@ export const sessionsService = {
     }
 
     sessionsDb.updateSessionCustomName(sessionId, summary);
+    // Best-effort, like the create-session route: the rename is already
+    // persisted, so a broadcast failure must not surface as an HTTP error the
+    // client would report as a failed rename.
+    await broadcastSessionUpserted(sessionId, 'rename').catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Sessions] Failed to broadcast renamed session', {
+        sessionId,
+        error: message,
+      });
+    });
     return { sessionId, summary };
   },
 };

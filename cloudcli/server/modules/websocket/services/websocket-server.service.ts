@@ -91,6 +91,13 @@ export function createWebSocketServer(
     ) => verifyWebSocketClient(info, dependencies.verifyClient)),
   });
 
+  // `ws` re-emits the HTTP server's bind errors on this instance. Without a
+  // listener an unavailable configured HOST crashes the process before the
+  // server's own error handler can fall back to the wildcard address.
+  wss.on('error', (error) => {
+    console.error('[WebSocket] Server error:', error instanceof Error ? error.message : error);
+  });
+
   wss.on('connection', (ws, request) => {
     attachWebSocketHeartbeat(ws);
 

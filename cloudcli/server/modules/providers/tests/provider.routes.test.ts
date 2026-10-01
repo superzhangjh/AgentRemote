@@ -93,6 +93,8 @@ test('session creation route names a CloudCLI session from the initial message',
       assert.equal(upsert?.sessionId, payload.data.sessionId);
       assert.equal(upsert?.providerSessionId, null);
       assert.equal(upsert?.provider, 'codex');
+      // A content-driven delta carries no `reason`; only a rename labels itself.
+      assert.equal('reason' in (upsert ?? {}), false);
       const session = upsert?.session as Record<string, unknown>;
       assert.equal(session.id, payload.data.sessionId);
       assert.equal(session.summary, 'abcd efg hij klm');
@@ -104,6 +106,44 @@ test('session creation route names a CloudCLI session from the initial message',
       assert.equal(project.fullPath, workspacePath);
       assert.equal(project.displayName, path.basename(workspacePath));
       assert.match(String(upsert?.timestamp), /^\d{4}-\d{2}-\d{2}T/);
+    } finally {
+      connectedClients.delete(client as never);
+    }
+  });
+});
+
+test('session rename broadcasts a session_upserted delta to every client', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    sessionsDb.createAppSession('rename-me', 'codex', workspacePath, 'Old title');
+
+    const client = new FakeConnection();
+    connectedClients.add(client as never);
+    try {
+      const response = await fetch(`${baseUrl}/api/providers/sessions/rename-me`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ summary: '  Renamed title  ' }),
+      });
+      const payload = await response.json() as {
+        data: { sessionId: string; summary: string };
+      };
+
+      assert.equal(response.status, 200);
+      assert.equal(payload.data.sessionId, 'rename-me');
+      assert.equal(payload.data.summary, 'Renamed title');
+      assert.equal(sessionsDb.getSessionById('rename-me')?.custom_name, 'Renamed title');
+
+      // The client that did not issue the rename still receives the new title,
+      // which is what keeps the sidebar in sync across devices.
+      const upsert = client.frames[0];
+      assert.equal(upsert?.kind, 'session_upserted');
+      assert.equal(upsert?.sessionId, 'rename-me');
+      assert.equal(upsert?.provider, 'codex');
+      // A rename is a title-only change: clients must not flag the row unread.
+      assert.equal(upsert?.reason, 'rename');
+      const session = upsert?.session as Record<string, unknown>;
+      assert.equal(session.id, 'rename-me');
+      assert.equal(session.summary, 'Renamed title');
     } finally {
       connectedClients.delete(client as never);
     }
@@ -272,5 +312,69 @@ test('model routes expose immutable defaults and full custom model CRUD', async 
       deletePayload.data.models.OPTIONS.some((option) => option.recordId === customRecordId),
       false,
     );
+  });
+});
+
+test('batch session deletion archives by default, force-deletes on request and reports skipped ids', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    sessionsDb.createSession('batch-route-archive', 'claude', workspacePath, 'Archive me');
+    sessionsDb.createSession('batch-route-force', 'claude', workspacePath, 'Delete me');
+
+    const archiveResponse = await fetch(`${baseUrl}/api/providers/sessions/batch-delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionIds: ['batch-route-archive', 'batch-route-missing'] }),
+    });
+    const archivePayload = await archiveResponse.json() as {
+      data: {
+        results: Array<{ sessionId: string; action: string; deletedFromDisk: boolean }>;
+        failures: Array<{ sessionId: string; message: string }>;
+      };
+    };
+
+    assert.equal(archiveResponse.status, 200);
+    assert.deepEqual(archivePayload.data.results, [
+      { sessionId: 'batch-route-archive', action: 'archived', deletedFromDisk: false },
+      { sessionId: 'batch-route-missing', action: 'skipped', deletedFromDisk: false },
+    ]);
+    assert.deepEqual(archivePayload.data.failures, []);
+    assert.equal(sessionsDb.getSessionById('batch-route-archive')?.isArchived, 1);
+
+    const forceResponse = await fetch(`${baseUrl}/api/providers/sessions/batch-delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionIds: ['batch-route-force'], force: true }),
+    });
+    const forcePayload = await forceResponse.json() as {
+      data: { results: Array<{ sessionId: string; action: string }> };
+    };
+
+    assert.equal(forceResponse.status, 200);
+    assert.deepEqual(forcePayload.data.results, [
+      { sessionId: 'batch-route-force', action: 'deleted', deletedFromDisk: false },
+    ]);
+    assert.equal(sessionsDb.getSessionById('batch-route-force'), null);
+  });
+});
+
+test('batch session deletion rejects an empty or malformed id list', async () => {
+  await withProviderServer(async (baseUrl) => {
+    const emptyResponse = await fetch(`${baseUrl}/api/providers/sessions/batch-delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionIds: [] }),
+    });
+    const emptyPayload = await emptyResponse.json() as { error: { code: string } };
+    assert.equal(emptyResponse.status, 400);
+    assert.equal(emptyPayload.error.code, 'INVALID_SESSION_IDS');
+
+    const malformedResponse = await fetch(`${baseUrl}/api/providers/sessions/batch-delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionIds: ['valid-id', 'bad id!'] }),
+    });
+    const malformedPayload = await malformedResponse.json() as { error: { code: string } };
+    assert.equal(malformedResponse.status, 400);
+    assert.equal(malformedPayload.error.code, 'INVALID_SESSION_ID');
   });
 });

@@ -6,9 +6,10 @@ import type { TFunction } from 'i18next';
 import { Button } from '@/shared/ui';
 import { Settings } from '@/modules/settings';
 import { VersionUpgradeModal } from '@/modules/version-upgrade';
-import type { InstallMode, PendingSidebarDeletion, Project, ReleaseInfo, SettingsProject } from '@/shared/types';
+import type { InstallMode, LLMProvider, PendingSidebarDeletion, Project, ReleaseInfo, SettingsProject } from '@/shared/types';
 import { normalizeProjectForSettings } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import { ProjectCreationWizard } from '@/modules/project-creation-wizard';
+import BatchDeleteSessionsDialog from '@/modules/sidebar/modals/BatchDeleteSessionsDialog';
 
 type SidebarModalsProps = {
   projects: Project[];
@@ -22,6 +23,11 @@ type SidebarModalsProps = {
   onCancelDeletion: () => void;
   onConfirmDeleteProject: (deleteData?: boolean) => void;
   onConfirmDeleteSession: (hardDelete?: boolean) => void;
+  onConfirmBatchDeleteSessions: (sessionIds: string[], hardDelete: boolean) => void;
+  /** Sessions with a run in flight; the batch dialog disables their checkboxes. */
+  activeSessions: ReadonlySet<string>;
+  /** The provider the sidebar is listing, so the batch dialog loads the same slice. */
+  selectedProvider: LLMProvider;
   showVersionModal: boolean;
   onCloseVersionModal: () => void;
   releaseInfo: ReleaseInfo | null;
@@ -57,6 +63,9 @@ export default function SidebarModals({
   onCancelDeletion,
   onConfirmDeleteProject,
   onConfirmDeleteSession,
+  onConfirmBatchDeleteSessions,
+  activeSessions,
+  selectedProvider,
   showVersionModal,
   onCloseVersionModal,
   releaseInfo,
@@ -202,6 +211,17 @@ export default function SidebarModals({
           </div>,
           document.body,
         )}
+
+      {pendingDeletion?.kind === 'batch-sessions' && (
+        <BatchDeleteSessionsDialog
+          project={pendingDeletion.project}
+          provider={selectedProvider}
+          activeSessionIds={activeSessions}
+          onConfirm={onConfirmBatchDeleteSessions}
+          onCancel={onCancelDeletion}
+          t={t}
+        />
+      )}
 
       <VersionUpgradeModal
         isOpen={showVersionModal}

@@ -10,7 +10,7 @@ import { usePaletteOps } from '@/modules/command-palette';
 import { useAwaitingInputSessionIdSet, useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
 import { readSelectedProvider, writeSelectedProvider } from '@/shared/selectedProvider';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
-import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSession, SidebarProjectListProps } from '@/shared/types';
+import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSession, ServerEvent, SidebarProjectListProps } from '@/shared/types';
 import SidebarCollapsed from '@/modules/sidebar/SidebarCollapsed';
 import SidebarContent from '@/modules/sidebar/SidebarContent';
 import SidebarModals from '@/modules/sidebar/SidebarModals';
@@ -36,6 +36,8 @@ type SidebarProps = {
   settingsInitialTab: string;
   onCloseSettings: () => void;
   isMobile: boolean;
+  /** Subscription to the unified websocket event stream, forwarded to the controller so the recent-conversations feed picks up renames made on other devices. */
+  subscribe: (listener: (event: ServerEvent) => void) => () => void;
 };
 
 type TaskMasterSidebarContext = {
@@ -63,6 +65,7 @@ function Sidebar({
   settingsInitialTab,
   onCloseSettings,
   isMobile,
+  subscribe,
 }: SidebarProps) {
   const { t } = useTranslation(['sidebar', 'common']);
   const { isPWA } = useDeviceSettings({ trackMobile: false });
@@ -139,6 +142,8 @@ function Sidebar({
     confirmDeleteSession,
     requestProjectDelete,
     confirmDeleteProject,
+    requestBatchDeleteSessions,
+    confirmBatchDeleteSessions,
     handleProjectSelect,
     openArchivedSession,
     restoreArchivedProject,
@@ -170,6 +175,7 @@ function Sidebar({
     setCurrentProject,
     setSidebarVisible: (visible) => setPreference('sidebarVisible', visible),
     sidebarVisible,
+    subscribe,
   });
 
   useEffect(() => {
@@ -228,6 +234,7 @@ function Sidebar({
     onCancelEditingProject: cancelRename,
     onSaveProjectName: handleSaveProjectName,
     onDeleteProject: requestProjectDelete,
+    onBatchDeleteSessions: requestBatchDeleteSessions,
     onSessionSelect: handleSessionClick,
     onDeleteSession: showDeleteSessionConfirmation,
     onForkSession: forkSession,
@@ -253,6 +260,9 @@ function Sidebar({
         onCancelDeletion={() => setPendingDeletion(null)}
         onConfirmDeleteProject={confirmDeleteProject}
         onConfirmDeleteSession={confirmDeleteSession}
+        onConfirmBatchDeleteSessions={confirmBatchDeleteSessions}
+        activeSessions={activeSessions}
+        selectedProvider={selectedProvider}
         showVersionModal={showVersionModal}
         onCloseVersionModal={() => setShowVersionModal(false)}
         releaseInfo={releaseInfo}

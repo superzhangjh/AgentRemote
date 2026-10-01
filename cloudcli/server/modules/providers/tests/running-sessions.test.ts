@@ -55,11 +55,9 @@ test('a native Codex turn is listed as externally running and cannot be interrup
     ];
     await writeFile(transcriptPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
     sessionsDb.createSession('native-codex', 'codex', tempDirectory, 'Native Codex', undefined, undefined, transcriptPath);
-    // Another app-server owns the run, so the activity probe rejects and the
-    // service falls back to the transcript boundary.
-    t.mock.method(codexAppServer, 'getThreadActivity', async () => {
-      throw new Error('not this app-server');
-    });
+    // A second app-server can report an external turn as idle. The shared
+    // transcript still shows that it is running.
+    t.mock.method(codexAppServer, 'getThreadActivity', async () => false);
 
     const running = await sessionsService.listRunningSessions('native-codex');
     const entry = running.find((session) => session.sessionId === 'native-codex');

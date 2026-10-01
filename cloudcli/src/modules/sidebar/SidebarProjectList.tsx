@@ -38,6 +38,7 @@ export default function SidebarProjectList({
   onCancelEditingProject,
   onSaveProjectName,
   onDeleteProject,
+  onBatchDeleteSessions,
   onSessionSelect,
   onDeleteSession,
   onForkSession,
@@ -110,6 +111,7 @@ export default function SidebarProjectList({
                 onCancelEditingProject={onCancelEditingProject}
                 onSaveProjectName={onSaveProjectName}
                 onDeleteProject={onDeleteProject}
+                onBatchDeleteSessions={onBatchDeleteSessions}
                 onSessionSelect={onSessionSelect}
                 onDeleteSession={onDeleteSession}
                 onForkSession={onForkSession}

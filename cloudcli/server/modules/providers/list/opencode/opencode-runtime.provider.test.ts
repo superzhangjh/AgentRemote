@@ -39,6 +39,8 @@ type ServerStub = {
   url: string;
   requests: Array<{ method: string | undefined; path: string }>;
   pushEvent(event: unknown): void;
+  /** Resolves once a client has attached to `/event`, so events are not lost. */
+  waitForEventStream(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -54,6 +56,10 @@ async function startServerStub(options: {
   const requests: ServerStub['requests'] = [];
   const eventStreams = new Set<http.ServerResponse>();
   const connections = new Set<import('node:net').Socket>();
+  let markEventStreamConnected: (() => void) | null = null;
+  const eventStreamConnected = new Promise<void>((resolve) => {
+    markEventStreamConnected = resolve;
+  });
 
   const writeEvent = (response: http.ServerResponse, event: unknown): void => {
     response.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -71,6 +77,7 @@ async function startServerStub(options: {
       });
       response.write(': connected\n\n');
       eventStreams.add(response);
+      markEventStreamConnected?.();
       response.on('close', () => eventStreams.delete(response));
       return;
     }
@@ -90,6 +97,10 @@ async function startServerStub(options: {
       }
       if (request.method === 'GET' && /^\/session\/[^/]+$/.test(url.pathname)) {
         sendJson(200, options.existingSession ?? { id: createdSessionId, directory: '/tmp', permission: [] });
+        return;
+      }
+      if (request.method === 'GET' && /^\/api\/session\/[^/]+$/.test(url.pathname)) {
+        sendJson(options.existingSession ? 200 : 404, options.existingSession ? { data: options.existingSession } : {});
         return;
       }
       if (request.method === 'PATCH' && /^\/session\/[^/]+$/.test(url.pathname)) {
@@ -126,6 +137,7 @@ async function startServerStub(options: {
         writeEvent(stream, event);
       }
     },
+    waitForEventStream: () => eventStreamConnected,
     close: () => new Promise<void>((resolve) => {
       for (const socket of connections) {
         socket.destroy();
@@ -189,9 +201,9 @@ test('opencode runtime streams a new session through the server SDK', async () =
 
   try {
     await withServerEnv(stub.url, async () => {
-      const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp' }, writer, runtimeContext);
+      const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp', openCodeServerId: 'configured' }, writer, runtimeContext);
       // Wait for the runtime to subscribe to /event before emitting the turn.
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await stub.waitForEventStream();
       emitSuccessfulTurn(stub);
       await runPromise;
 
@@ -226,6 +238,124 @@ test('opencode runtime streams a new session through the server SDK', async () =
   }
 });
 
+test('opencode runtime skips the prompt part OpenCode echoes back', async () => {
+  // The server emits message/part updates for the user's own prompt. They must
+  // not stream as assistant text, or the reply starts by repeating the user's
+  // message (the duplicate-content bug reported from the phone).
+  const stub = await startServerStub();
+  const messages: Array<Record<string, unknown>> = [];
+  const writer = createWriter(messages);
+
+  try {
+    await withServerEnv(stub.url, async () => {
+      const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp' }, writer, runtimeContext);
+      await stub.waitForEventStream();
+      stub.pushEvent({
+        type: 'message.updated',
+        properties: {
+          sessionID: 'ses_live',
+          info: { id: 'msg-user', sessionID: 'ses_live', role: 'user' },
+        },
+      });
+      stub.pushEvent({
+        type: 'message.part.updated',
+        properties: {
+          sessionID: 'ses_live',
+          part: {
+            id: 'part-user-text',
+            sessionID: 'ses_live',
+            messageID: 'msg-user',
+            type: 'text',
+            text: 'Hi',
+          },
+        },
+      });
+      emitSuccessfulTurn(stub);
+      await runPromise;
+
+      const deltas = messages.filter((message) => message.kind === 'stream_delta');
+      assert.equal(deltas.length, 1);
+      assert.equal(deltas[0]?.content, 'assistant response');
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
+test('opencode runtime keeps the text position when a stale empty part update arrives', async () => {
+  // Text parts grow, but a trailing empty update must not reset the recorded
+  // length; otherwise the next full update re-sends the whole part as a delta.
+  const stub = await startServerStub();
+  const messages: Array<Record<string, unknown>> = [];
+  const writer = createWriter(messages);
+
+  try {
+    await withServerEnv(stub.url, async () => {
+      const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp' }, writer, runtimeContext);
+      await stub.waitForEventStream();
+      const part = {
+        id: 'part-text',
+        sessionID: 'ses_live',
+        messageID: 'msg-1',
+        type: 'text',
+        text: 'assistant response',
+      };
+      stub.pushEvent({ type: 'message.part.updated', properties: { sessionID: 'ses_live', part } });
+      stub.pushEvent({
+        type: 'message.part.updated',
+        properties: { sessionID: 'ses_live', part: { ...part, text: '' } },
+      });
+      stub.pushEvent({ type: 'message.part.updated', properties: { sessionID: 'ses_live', part } });
+      stub.pushEvent({
+        type: 'message.part.updated',
+        properties: {
+          sessionID: 'ses_live',
+          part: { id: 'part-step', sessionID: 'ses_live', messageID: 'msg-1', type: 'step-finish' },
+        },
+      });
+      stub.pushEvent({ type: 'session.idle', properties: { sessionID: 'ses_live' } });
+      await runPromise;
+
+      const deltas = messages.filter((message) => message.kind === 'stream_delta');
+      assert.equal(deltas.length, 1);
+      assert.equal(deltas[0]?.content, 'assistant response');
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
+test('opencode runtime refuses an instance that is no longer available', async () => {
+  const stub = await startServerStub();
+  try {
+    await withServerEnv(stub.url, async () => {
+      await assert.rejects(
+        opencodeRuntime.run('Hi', { cwd: '/tmp', openCodeServerId: 'missing' }, createWriter(), runtimeContext),
+        /instance is unavailable/,
+      );
+      assert.equal(stub.requests.length, 0);
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
+test('opencode runtime resumes an imported session on its owning server', async () => {
+  const stub = await startServerStub({ existingSession: { id: 'ses_imported', directory: '/tmp', permission: [] } });
+  try {
+    await withServerEnv(stub.url, async () => {
+      const runPromise = opencodeRuntime.run('Continue', { cwd: '/tmp', sessionId: 'ses_imported' }, createWriter(), runtimeContext);
+      await stub.waitForEventStream();
+      emitSuccessfulTurn(stub, 'ses_imported');
+      await runPromise;
+      assert.ok(stub.requests.some((request) => request.path === '/api/session/ses_imported'));
+      assert.ok(stub.requests.some((request) => request.path === '/session/ses_imported/prompt_async'));
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
 test('opencode runtime creates the session on the server so questions are allowed', async () => {
   const stub = await startServerStub({ createdSessionId: 'ses_stubbed' });
   const messages: Array<Record<string, unknown>> = [];
@@ -234,7 +364,7 @@ test('opencode runtime creates the session on the server so questions are allowe
   try {
     await withServerEnv(stub.url, async () => {
       const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp' }, writer, runtimeContext);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await stub.waitForEventStream();
       emitSuccessfulTurn(stub, 'ses_stubbed');
       await runPromise;
 
@@ -268,7 +398,7 @@ test('opencode runtime repairs a resumed session whose question permission is de
   try {
     await withServerEnv(stub.url, async () => {
       const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp' }, writer, resumeContext);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await stub.waitForEventStream();
       emitSuccessfulTurn(stub, providerSessionId);
       await runPromise;
 
@@ -294,7 +424,7 @@ test('opencode runtime surfaces a server session error and fails the run', async
   try {
     await withServerEnv(stub.url, async () => {
       const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp' }, writer, runtimeContext);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await stub.waitForEventStream();
       stub.pushEvent({
         type: 'session.error',
         properties: { sessionID: 'ses_live', error: { message: 'model unavailable' } },
@@ -303,6 +433,30 @@ test('opencode runtime surfaces a server session error and fails the run', async
 
       const complete = messages.find((message) => message.kind === 'complete');
       assert.equal(complete?.exitCode, 1);
+    });
+  } finally {
+    await stub.close();
+  }
+});
+
+test('opencode runtime explains a certificate error instead of displaying JSON', async () => {
+  const stub = await startServerStub();
+  const messages: Array<Record<string, unknown>> = [];
+  try {
+    await withServerEnv(stub.url, async () => {
+      const runPromise = opencodeRuntime.run('Hi', { cwd: '/tmp' }, createWriter(messages), runtimeContext);
+      await stub.waitForEventStream();
+      stub.pushEvent({
+        type: 'session.error',
+        properties: {
+          sessionID: 'ses_live',
+          error: { name: 'UnknownError', data: { message: 'self signed certificate' } },
+        },
+      });
+      await assert.rejects(runPromise, /cannot verify its model provider certificate/);
+      const error = messages.find((message) => message.kind === 'error');
+      assert.match(String(error?.content), /self signed certificate/);
+      assert.doesNotMatch(String(error?.content), /"name":/);
     });
   } finally {
     await stub.close();

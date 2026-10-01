@@ -1,5 +1,11 @@
+import os from 'node:os';
+import path from 'node:path';
+
 import { sessionsDb } from '@/modules/database/index.js';
-import { createOpenCodeServerClient } from '@/modules/providers/list/opencode/opencode-server.js';
+import {
+  createOpenCodeServerClients,
+  type OpenCodeServer,
+} from '@/modules/providers/list/opencode/opencode-server.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 import type { AnyRecord } from '@/shared/types.js';
 import {
@@ -15,7 +21,15 @@ type SynchronizeRowsResult = {
   firstSessionId: string | null;
 };
 
+/** One discovered session plus the server that owns it, for follow-up reads. */
+type DiscoveredSession = {
+  session: AnyRecord;
+  server: OpenCodeServer;
+};
+
 const OPENCODE_FALLBACK_TITLE = 'Untitled OpenCode Session';
+/** Safety bound on session-list pagination so a bad cursor cannot loop forever. */
+const MAX_LIST_PAGES = 50;
 
 /**
  * OpenCode seeds every new session with the placeholder title
@@ -32,7 +46,7 @@ function isPlaceholderSessionTitle(title: string | null | undefined): boolean {
   return /^New session\b/.test(title.trim());
 }
 
-/** Reads a numeric field off the SDK session's `time` object. */
+/** Reads a numeric field off a session's `time` object. */
 function readSessionTime(session: AnyRecord): { created: number | null; updated: number | null } {
   const time = readObjectRecord(session.time);
   const created = Number(time?.created);
@@ -43,17 +57,59 @@ function readSessionTime(session: AnyRecord): { created: number | null; updated:
   };
 }
 
+/** Most-recent activity timestamp, used to order merged multi-server listings. */
+function readSessionUpdatedAt(session: AnyRecord): number {
+  const { created, updated } = readSessionTime(session);
+  return updated ?? created ?? 0;
+}
+
+/**
+ * Directory a session belongs to.
+ *
+ * The v2 API nests it under `location.directory`; the 1.18 compatibility shape
+ * exposes it top-level - both are accepted.
+ */
+function readSessionDirectory(session: AnyRecord): string | null {
+  return readOptionalString(readObjectRecord(session.location)?.directory)
+    ?? readOptionalString(session.directory)
+    ?? null;
+}
+
+/**
+ * Whether a session's working directory is one of the OpenCode CLI's internal
+ * probe directories.
+ *
+ * The CLI runs liveness/permission probes as real sessions - `opencode-cli-live-*`
+ * and `opencode-cli-perms-*` directly under the system temp root - and every
+ * server lists them like user conversations. Their directories vanish when the
+ * CLI exits, and asking a server for approvals scoped to those dead paths
+ * answers HTTP 500 every poll, so they must never become app projects.
+ */
+function isInternalProbeSessionDirectory(directory: string): boolean {
+  const tempRoot = path.resolve(os.tmpdir());
+  const resolved = path.resolve(directory);
+  if (!resolved.startsWith(`${tempRoot}${path.sep}`)) {
+    return false;
+  }
+
+  return path.basename(resolved).startsWith('opencode-cli-');
+}
+
 /**
  * Session indexer for OpenCode's server-backed session store.
  *
- * The server is the authority on which sessions exist, so listings come from
- * the SDK rather than the SQLite file the CLI happens to write.
+ * Every discoverable server is scanned with the v2 API, which both 1.18 and 2.0
+ * expose and which lists sessions across all projects. That keeps a session
+ * started in the desktop app visible on the phone even though the console runs
+ * a separate `opencode serve` process. Sessions the index has not seen yet are
+ * imported unconditionally, so a scan that missed one - an unreachable server,
+ * a restart between scans - self-heals on the next run.
  */
 export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer {
   private readonly provider = 'opencode' as const;
 
   /**
-   * Scans the OpenCode server and upserts its sessions into DB.
+   * Scans every OpenCode server and upserts its sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
     const sessions = await this.listSessions();
@@ -68,49 +124,94 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
   /**
    * Handles watcher changes by indexing the most recently updated session.
    *
-   * The file path is ignored: the server already reports every session, and the
+   * The file path is ignored: the servers already report every session, and the
    * watcher's change is only a hint that a scan is due.
    */
   async synchronizeFile(_filePath: string): Promise<string | null> {
     const sessions = await this.listSessions(1);
-    if (!sessions) {
+    if (!sessions || sessions.length === 0) {
       return null;
     }
 
-    const result = await this.upsertSessions(sessions, undefined);
+    // Only the globally most recent session belongs to this change; the
+    // per-server `limit` above already narrowed the candidates.
+    const result = await this.upsertSessions(sessions.slice(0, 1), undefined);
     return result.firstSessionId;
   }
 
   /**
-   * Lists root sessions from the server, most recently updated first.
-   *
-   * Returns null when the server is unreachable so callers can distinguish "no
-   * sessions" from "could not scan".
+   * Lists root sessions from every discovered server, most recently updated
+   * first. Returns null when no server answered, so callers can distinguish
+   * "no sessions" from "could not scan".
    */
-  private async listSessions(limit?: number): Promise<AnyRecord[] | null> {
-    try {
-      const client = createOpenCodeServerClient();
-      const result = await client.session.list(
-        { roots: true, ...(limit ? { limit } : {}) },
-        { throwOnError: true },
-      );
-      const data = Array.isArray(result.data) ? result.data : [];
-      return data
-        .map(readObjectRecord)
-        .filter((session): session is AnyRecord => session !== null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn('[OpenCodeProvider] Failed to synchronize sessions:', message);
+  private async listSessions(limitPerServer?: number): Promise<DiscoveredSession[] | null> {
+    const servers = createOpenCodeServerClients();
+    const byId = new Map<string, DiscoveredSession>();
+    let reached = 0;
+
+    for (const server of servers) {
+      try {
+        const sessions = await this.listServerSessions(server, limitPerServer);
+        reached += 1;
+        for (const session of sessions) {
+          const sessionId = readOptionalString(session.id);
+          if (sessionId && !byId.has(sessionId)) {
+            byId.set(sessionId, { session, server });
+          }
+        }
+      } catch {
+        // A server that is down or rejects the request contributes nothing;
+        // the others still do.
+      }
+    }
+
+    if (reached === 0) {
+      console.warn('[OpenCodeProvider] Failed to synchronize sessions: no OpenCode server reachable.');
       return null;
     }
+
+    return [...byId.values()].sort(
+      (left, right) => readSessionUpdatedAt(right.session) - readSessionUpdatedAt(left.session),
+    );
   }
 
-  private async upsertSessions(sessions: AnyRecord[], since?: Date): Promise<SynchronizeRowsResult> {
+  /** Reads one server's session list, following its cursor until exhausted. */
+  private async listServerSessions(server: OpenCodeServer, limit?: number): Promise<AnyRecord[]> {
+    const collected: AnyRecord[] = [];
+    let cursor: string | undefined;
+
+    for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+      const result = await server.client.v2.session.list(
+        { ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+        { throwOnError: true },
+      );
+      const body = readObjectRecord(result.data) ?? {};
+      for (const value of Array.isArray(body.data) ? body.data : []) {
+        const session = readObjectRecord(value);
+        if (session) {
+          collected.push(session);
+        }
+      }
+
+      cursor = readOptionalString(readObjectRecord(body.cursor)?.next) ?? undefined;
+      if (!cursor || (limit && collected.length >= limit)) {
+        break;
+      }
+    }
+
+    return limit ? collected.slice(0, limit) : collected;
+  }
+
+  private async upsertSessions(
+    discovered: DiscoveredSession[],
+    since?: Date,
+  ): Promise<SynchronizeRowsResult> {
     const sinceMillis = since?.getTime() ?? null;
     let processed = 0;
     let firstSessionId: string | null = null;
 
-    for (const session of sessions) {
+    for (const entry of discovered) {
+      const { session } = entry;
       // Subagent runs create child sessions (`parentID` set). They are internal
       // task branches, not conversations the user started, so indexing them
       // adds phantom sidebar entries that look like duplicate sessions.
@@ -122,11 +223,34 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       if (readObjectRecord(session.time)?.archived != null) {
         continue;
       }
-      if (sinceMillis !== null && (updated ?? created ?? 0) < sinceMillis) {
+
+      const sessionDirectory = readSessionDirectory(session);
+      if (sessionDirectory && isInternalProbeSessionDirectory(sessionDirectory)) {
         continue;
       }
 
-      const indexedSessionId = await this.upsertSession(session, created, updated);
+      const sessionId = readOptionalString(session.id);
+      if (sessionId && sessionsDb.isProviderSessionSuperseded(sessionId, this.provider)) {
+        // The user deleted this conversation in CloudCLI. The server keeps
+        // listing it, so only the tombstone keeps the indexer from importing
+        // the deleted conversation back into the sidebar.
+        continue;
+      }
+
+      // The scan cursor only gates *refreshes* of sessions the index already
+      // knows. A session the index has never seen is imported no matter how
+      // old it is: scans that ran while its server was unreachable skipped it
+      // while still advancing `scan_state.last_scanned_at`, and the cursor
+      // never moves back, so it would stay invisible on the phone forever.
+      const indexedSession = sessionId
+        ? sessionsDb.getSessionByProviderSessionId(sessionId, this.provider)
+          ?? sessionsDb.getSessionById(sessionId, this.provider)
+        : null;
+      if (sinceMillis !== null && indexedSession && (updated ?? created ?? 0) < sinceMillis) {
+        continue;
+      }
+
+      const indexedSessionId = await this.upsertSession(entry, created, updated);
       if (!indexedSessionId) {
         continue;
       }
@@ -141,12 +265,13 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
   }
 
   private async upsertSession(
-    session: AnyRecord,
+    entry: DiscoveredSession,
     createdAt: number | null,
     updatedAt: number | null,
   ): Promise<string | null> {
+    const { session, server } = entry;
     const sessionId = readOptionalString(session.id);
-    const projectPath = readOptionalString(session.directory);
+    const projectPath = readSessionDirectory(session);
     if (!sessionId || !projectPath) {
       return null;
     }
@@ -178,14 +303,14 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       // title OpenCode generated once the first turn completed.
       nextName = providerTitle;
     } else {
-      nextName = existingName ?? providerTitle ?? await this.readFirstUserText(sessionId, projectPath);
+      nextName = existingName ?? providerTitle ?? await this.readFirstUserText(server, sessionId);
     }
 
     // OpenCode keeps every session in one server store, so jsonl_path must stay
     // null to avoid deleting shared state when one app session is removed.
     // Return the canonical stored row id so watcher-triggered sidebar updates
     // stay on the app session once provider_session_id has already been mapped.
-    return sessionsDb.createSession(
+    const appSessionId = sessionsDb.createSession(
       sessionId,
       this.provider,
       projectPath,
@@ -194,35 +319,28 @@ export class OpenCodeSessionSynchronizer implements IProviderSessionSynchronizer
       normalizeProviderTimestamp(updatedAt ?? createdAt),
       null,
     );
+    sessionsDb.pinOpenCodeServer(appSessionId, server.config.id ?? server.config.url);
+    return appSessionId;
   }
 
-  /** Reads the first user prompt text, used only when the server has no title. */
-  private async readFirstUserText(sessionId: string, directory: string): Promise<string | undefined> {
+  /** Reads the first user prompt text, used only when a session has no title. */
+  private async readFirstUserText(server: OpenCodeServer, sessionId: string): Promise<string | undefined> {
     try {
-      const client = createOpenCodeServerClient();
-      const result = await client.session.messages(
-        { sessionID: sessionId, directory },
+      const result = await server.client.v2.session.messages(
+        { sessionID: sessionId },
         { throwOnError: true },
       );
-      const data = Array.isArray(result.data) ? result.data : [];
-      for (const entry of data) {
-        const info = readObjectRecord(entry?.info);
-        if (readOptionalString(info?.role) !== 'user') {
+      const body = readObjectRecord(result.data) ?? {};
+      for (const value of Array.isArray(body.data) ? body.data : []) {
+        const message = readObjectRecord(value);
+        if (readOptionalString(message?.type) !== 'user') {
           continue;
         }
 
-        const parts = Array.isArray(entry?.parts) ? entry.parts : [];
-        for (const partValue of parts) {
-          const part = readObjectRecord(partValue);
-          if (readOptionalString(part?.type) !== 'text') {
-            continue;
-          }
-
-          const text = readOptionalString(part?.text);
-          // OpenCode persists the first prompt as a JSON string literal (e.g.
-          // `"hello"`), so decode it to avoid titling the session with quotes.
-          return text === undefined ? undefined : unwrapJsonStringLiteral(text);
-        }
+        const text = readOptionalString(message?.text);
+        // OpenCode persists the first prompt as a JSON string literal (e.g.
+        // `"hello"`), so decode it to avoid titling the session with quotes.
+        return text === undefined ? undefined : unwrapJsonStringLiteral(text);
       }
     } catch {
       return undefined;

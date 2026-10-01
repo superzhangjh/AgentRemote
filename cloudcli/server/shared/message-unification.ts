@@ -2,9 +2,9 @@ import type { AnyRecord, NormalizedMessage } from '@/shared/types.js';
 import { readObjectRecord } from '@/shared/utils.js';
 
 /**
- * Cross-provider unification of the two interaction surfaces that Claude and
- * Codex both have but spell differently: the running checklist and the
- * ask-the-user round trip.
+ * Cross-provider unification of the two interaction surfaces the providers
+ * have but spell differently: the running checklist and the ask-the-user
+ * round trip.
  *
  * Each provider parses its own transcript format first; this pass runs once the
  * tool results have been attached and rewrites those rows onto a single
@@ -26,8 +26,8 @@ const CHECKLIST_TOOL = 'TodoWrite';
 /** The one tool name every provider's user-question call is rewritten onto. */
 const ASK_TOOL = 'AskUserQuestion';
 
-/** Provider spellings of the ask-the-user tool. Codex calls it `request_user_input`. */
-const ASK_TOOL_ALIASES = new Set([ASK_TOOL, 'request_user_input']);
+/** Provider spellings of the ask-the-user tool. Codex calls it `request_user_input`, OpenCode `question`. */
+const ASK_TOOL_ALIASES = new Set([ASK_TOOL, 'request_user_input', 'question']);
 
 /**
  * Claude's incremental task tracker. Each call mutates one entry of a list the
